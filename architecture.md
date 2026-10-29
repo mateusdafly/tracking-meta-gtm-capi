@@ -12,7 +12,7 @@ Um pixel de browser (fbq, gtag) depende inteiramente do ambiente do cliente para
 
 **Ad blockers:** uBlock Origin, AdBlock Plus e equivalentes bloqueiam requisições ao `connect.facebook.net` antes mesmo do script carregar. Em audiências técnicas (desenvolvedores, SaaS B2B), a taxa de bloqueio pode passar de 40%.
 
-**Safari ITP (Intelligent Tracking Prevention):** desde o Safari 14, cookies de terceiros são bloqueados por padrão. O `_fbp` e o `_fbc` — que a Meta usa para identificar o usuário no browser — têm vida útil limitada a 7 dias em primeiro clique e são apagados completamente em alguns contextos de iOS 17+. Isso degrada o matching mesmo quando o pixel carrega corretamente.
+**Safari ITP (Intelligent Tracking Prevention):** o Safari bloqueia cookies de terceiros e limita a 7 dias os cookies gravados por JavaScript, que é o caso do `_fbp` e do `_fbc`. No iOS 17+, a proteção de rastreamento de links também tira o `fbclid` e o `gclid` da URL na navegação privada e em links abertos pelo Mail e pelo Mensagens. Isso degrada o matching mesmo quando o pixel carrega corretamente.
 
 **Usuário fecha a aba:** em checkouts PIX, o fluxo típico é: usuário paga no app do banco, volta ao site, e só então o frontend dispara o evento Purchase. Se ele não voltou — fechou a aba depois de pagar no banco — o evento browser nunca dispara.
 
@@ -25,8 +25,6 @@ A Conversions API server-side resolve todos os problemas acima: o servidor sempr
 **Sem dados de sessão:** o servidor não tem acesso ao contexto de navegação do usuário — URL da página, referrer, scroll depth. Esse contexto existe apenas no browser.
 
 **Qualidade de matching degradada sem fbp/fbc:** o `_fbp` é um identificador único gerado pelo pixel da Meta no browser do usuário. Sem ele, a Meta precisa fazer matching apenas por email/telefone/IP, o que é menos preciso. Mais conversões ficam sem atribuição.
-
-**Attribution window diferente:** eventos CAPI puros têm janelas de atribuição menores por padrão no Meta Ads Manager.
 
 **Conclusão:** os dois canais são complementares, não substitutos. A estratégia correta é enviar SEMPRE pelos dois, e usar o `event_id` para que a Meta elimine duplicatas automaticamente.
 
@@ -146,9 +144,11 @@ USUÁRIO                    FRONTEND (React)            BACKEND (Express)       
 
 ### O que acontece na Meta ao receber
 
-A Meta mantém uma janela de deduplicação de **48 horas** por `event_id`. Se o mesmo `event_id` chegar por múltiplos canais (pixel browser + CAPI polling + CAPI webhook), apenas **uma** conversão é registrada. Isso é o comportamento correto.
+A Meta deduplica quando **`event_name` e `event_id` são iguais**, dentro de **48 horas** do primeiro evento recebido com aquele `event_id`. Se o mesmo Purchase chegar por vários canais (pixel browser + CAPI polling + CAPI webhook) com o mesmo ID, apenas **uma** conversão é registrada. Isso é o comportamento correto.
 
-Se os `event_id` fossem diferentes por canal, a Meta contaria 2 ou 3 conversões para uma única venda.
+Se os `event_id` fossem diferentes por canal, a Meta contaria 2 ou 3 conversões para uma única venda. É o erro mais comum: o navegador gerar um UUID novo na hora do Purchase em vez de reusar o ID do checkout que o backend salvou.
+
+Como a deduplicação olha o par nome + ID, o mesmo `checkoutId` pode ser usado em InitiateCheckout, AddPaymentInfo e Purchase sem que um evento apague o outro.
 
 ---
 
@@ -240,6 +240,8 @@ CAPI adiciona complexidade de backend significativa. Em alguns cenários, não v
 
 **Projetos sem backend próprio:** se o site usa apenas serviços de terceiros (Shopify, Hotmart, Kiwify), o CAPI já está implementado pela plataforma. Duplicar no backend próprio geraria duplicatas.
 
+**Quando CAPI é o único caminho:** venda que fecha fora do site (WhatsApp, telefone, vendedor, CRM). Não existe página de sucesso para o pixel disparar. Ver `crm-utms-e-vendas.md`.
+
 **Audiências sem ad blocker significativo:** se a análise de tráfego mostra que menos de 5% dos usuários usam ad blockers e o produto não é voltado a público técnico, o ganho marginal do CAPI server-side pode não justificar o custo de implementação.
 
 **Orçamento de ads muito pequeno:** abaixo de R$2.000/mês em Meta Ads, a diferença de qualidade de dado raramente se traduz em melhora mensurável de ROAS. O tempo de implementação teria ROI melhor investido em criativo ou segmentação.
@@ -262,4 +264,4 @@ CAPI adiciona complexidade de backend significativa. Em alguns cenários, não v
 
 **Eventos duplicados em desenvolvimento:** em hot reload (Vite, Next.js), o componente pode montar e desmontar várias vezes, disparando múltiplos `dataLayer.push()` para o mesmo evento. Em produção isso não ocorre. Solução para dev: usar `useEffect` com dependência vazia e flag de `fired` para garantir disparo único.
 
-**Rate limiting da CAPI:** a Meta tem limites por pixel. Para volumes muito altos (acima de 1.000 eventos/hora), implementar batching. Para a maioria dos casos de infoproduto/SaaS pequeno, o fire-and-forget individual é suficiente.
+**Volume da CAPI:** a Meta aceita até 1.000 eventos por requisição. Em volume alto, agrupe os eventos em lotes e mande dentro de uma hora do acontecimento. Para a maioria dos casos de infoproduto/SaaS pequeno, o fire-and-forget individual é suficiente.

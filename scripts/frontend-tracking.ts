@@ -8,9 +8,13 @@
  *   1. Push Meta (PascalCase, campos na raiz)
  *   2. Push GA4  (snake_case, campos dentro de ecommerce{})
  *
- * Deduplicação CAPI: gere o event_id AQUI e passe-o também
- * para o backend ao criar o pagamento. O backend inclui o
- * mesmo event_id no request da Conversions API server-side.
+ * Deduplicação CAPI: gere UM checkoutId quando o checkout abre
+ * (newCheckoutId()), guarde no estado, mande ao backend no POST que
+ * cria o pagamento e passe esse MESMO ID como eventId em
+ * InitiateCheckout, AddPaymentInfo e Purchase. O backend salva o ID
+ * no banco e usa o mesmo valor na Conversions API. A Meta deduplica
+ * quando event_name e event_id batem, então reaproveitar o ID em
+ * eventos de nomes diferentes é seguro.
  *
  * Nenhum Pixel ID ou credencial está hardcoded aqui.
  * O GTM cuida da entrega; este módulo só alimenta o dataLayer.
@@ -28,9 +32,9 @@ export interface UserData {
   fn: string
   /** SHA-256 do sobrenome em lowercase */
   ln: string
-  /** SHA-256 do telefone em formato E.164 (ex: +5511999999999) */
+  /** SHA-256 do telefone só com dígitos, com DDI e SEM "+" (ex: 5511999999999) */
   phone: string
-  /** ID externo do usuário — NÃO hasheado (UUID ou ID interno) */
+  /** SHA-256 do ID interno do usuário (mesmo hash que o backend manda na CAPI) */
   external_id: string
   /** Cookie _fbp lido do browser (gerado pelo Pixel ao carregar) */
   fbp?: string
@@ -56,11 +60,15 @@ export interface ProductPayload {
   paymentMethod?: string
   /** ID de transação (ex: ID do pagamento no gateway). Obrigatório em Purchase. */
   transactionId?: string
+  /**
+   * checkoutId gerado por newCheckoutId() quando o checkout abriu.
+   * É o mesmo valor que o backend salvou e usa na CAPI.
+   */
+  eventId?: string
 }
 
-/** Resultado de trackPurchase — inclui o event_id gerado para envio ao backend. */
+/** Resultado de trackPurchase — devolve o event_id usado no push. */
 export interface PurchaseTrackingResult {
-  /** UUID gerado no frontend. Deve ser enviado ao backend para uso na CAPI. */
   eventId: string
 }
 
@@ -93,46 +101,63 @@ export async function sha256(value: string): Promise<string> {
 }
 
 /**
- * Normaliza um número de telefone para formato E.164.
- * Assume Brasil como padrão se não houver DDI.
- * Remove todos os caracteres não numéricos antes de processar.
+ * Normaliza um telefone para o formato que a META espera antes do hash:
+ * só dígitos, com DDI, SEM o "+" (ex: "5511999999999").
+ * Tem que dar exatamente o mesmo resultado que normalizePhone do backend,
+ * senão o hash do navegador e o do servidor não batem.
  *
  * Exemplos:
- *   "(11) 99999-9999"    → "+5511999999999"
- *   "11999999999"        → "+5511999999999"
- *   "+5511999999999"     → "+5511999999999"
+ *   "(11) 99999-9999"    → "5511999999999"
+ *   "11999999999"        → "5511999999999"
+ *   "+55 11 99999-9999"  → "5511999999999"
+ *   "+1 415 555 2671"    → "14155552671"
+ *
+ * Atenção: o Google quer E.164 COM "+" antes do hash. Ver pii-hashing.md.
  *
  * @param phone - número de telefone em qualquer formato
- * @param defaultCountryCode - DDI padrão se não encontrado (default: "55" para Brasil)
+ * @param defaultCountryCode - DDI usado quando o número vem sem DDI (padrão "55")
  */
 export function normalizePhone(
   phone: string,
   defaultCountryCode = '55',
 ): string {
-  // Remove tudo que não for dígito
-  const digits = phone.replace(/\D/g, '')
+  const hadPlus = phone.trim().startsWith('+')
+  let digits = phone.replace(/\D/g, '')
 
-  // Já tem DDI do Brasil (começa com 55 e tem 12 ou 13 dígitos)
+  // Veio com "+": o DDI já está no número
+  if (hadPlus) return digits
+
+  // Já tem DDI do Brasil (55 + DDD + número = 12 ou 13 dígitos)
   if (digits.startsWith('55') && (digits.length === 12 || digits.length === 13)) {
-    return `+${digits}`
+    return digits
   }
 
-  // Número brasileiro sem DDI (10 ou 11 dígitos — DDD + número)
-  if (digits.length === 10 || digits.length === 11) {
-    return `+${defaultCountryCode}${digits}`
-  }
+  // Remove o 0 de discagem de longa distância
+  if (digits.startsWith('0')) digits = digits.slice(1)
 
-  // Retorna com + se já tiver DDI implícito em outros formatos
-  return `+${digits}`
+  return `${defaultCountryCode}${digits}`
+}
+
+/**
+ * Gera o ID do checkout. Chame UMA vez quando o checkout abrir e reutilize
+ * o valor em todos os eventos desse checkout e no POST ao backend.
+ */
+export function newCheckoutId(): string {
+  return crypto.randomUUID()
 }
 
 /**
  * Lê os cookies de rastreamento do Meta Pixel do documento.
  *
  * - `_fbp`: identificador de browser gerado pelo Pixel (fb.1.timestamp.random)
- * - `_fbc`: parâmetro fbclid da URL quando o usuário clicou num anúncio Meta
+ * - `_fbc`: click ID no formato fb.1.{timestamp_ms}.{fbclid}
  *
- * Esses valores são passados ao CAPI para melhorar o match de eventos.
+ * Se o `_fbc` não existe (ad blocker, pixel bloqueado) mas a URL tem `fbclid`,
+ * monta o fbc no formato certo. O fbclid cru NÃO serve como fbc, e o valor
+ * nunca pode ter maiúsculas/minúsculas alteradas.
+ *
+ * O fbclid some da URL na navegação seguinte: para não perdê-lo, use
+ * scripts/captura-origem.js na primeira página.
  *
  * @returns objeto com fbp e fbc (ambos podem ser undefined se não existirem)
  */
@@ -141,16 +166,22 @@ export function readMetaCookies(): { fbp?: string; fbc?: string } {
 
   const cookies = document.cookie.split('; ').reduce<Record<string, string>>(
     (acc, cookie) => {
-      const [key, value] = cookie.split('=')
-      if (key && value) acc[key.trim()] = decodeURIComponent(value)
+      const i = cookie.indexOf('=')
+      if (i > 0) acc[cookie.slice(0, i).trim()] = decodeURIComponent(cookie.slice(i + 1))
       return acc
     },
     {},
   )
 
+  let fbc = cookies['_fbc']
+  if (!fbc) {
+    const fbclid = new URLSearchParams(window.location.search).get('fbclid')
+    if (fbclid) fbc = `fb.1.${Date.now()}.${fbclid}`
+  }
+
   return {
     fbp: cookies['_fbp'],
-    fbc: cookies['_fbc'],
+    fbc,
   }
 }
 
@@ -168,12 +199,14 @@ export function readMetaCookies(): { fbp?: string; fbc?: string } {
  *
  * Como o dataLayer é cumulativo, uma vez setado o objeto `user`,
  * ele ficará disponível para todas as tags GTM nos eventos seguintes.
+ * O push leva event='user_identified', que dispara a tag de Advanced
+ * Matching do Meta (ver gtm-setup.md).
  *
  * @param rawEmail     - email em texto puro (será hasheado aqui)
  * @param rawFirstName - primeiro nome em texto puro
  * @param rawLastName  - sobrenome em texto puro
  * @param rawPhone     - telefone em qualquer formato (será normalizado e hasheado)
- * @param userId       - ID único do usuário no sistema (NÃO hasheado)
+ * @param userId       - ID único do usuário no sistema (será hasheado, igual ao backend)
  */
 export async function setUserInDataLayer({
   rawEmail,
@@ -193,11 +226,12 @@ export async function setUserInDataLayer({
   const normalizedPhone = normalizePhone(rawPhone)
   const { fbp, fbc } = readMetaCookies()
 
-  const [hashedEmail, hashedFn, hashedLn, hashedPhone] = await Promise.all([
+  const [hashedEmail, hashedFn, hashedLn, hashedPhone, hashedUserId] = await Promise.all([
     sha256(rawEmail),
     sha256(rawFirstName),
     sha256(rawLastName),
     sha256(normalizedPhone),
+    sha256(String(userId)),
   ])
 
   const userData: UserData = {
@@ -205,12 +239,12 @@ export async function setUserInDataLayer({
     fn: hashedFn,
     ln: hashedLn,
     phone: hashedPhone,
-    external_id: userId,
+    external_id: hashedUserId,
     ...(fbp && { fbp }),
     ...(fbc && { fbc }),
   }
 
-  window.dataLayer.push({ user: userData })
+  window.dataLayer.push({ event: 'user_identified', user: userData })
 
   return userData
 }
@@ -218,6 +252,33 @@ export async function setUserInDataLayer({
 // ---------------------------------------------------------------------------
 // Eventos de rastreamento
 // ---------------------------------------------------------------------------
+
+/**
+ * Dispara Lead: formulário de contato enviado com sucesso.
+ *
+ * Chame DEPOIS que o backend respondeu com o idLead, e use `lead_{idLead}`:
+ * é o mesmo event_id que o backend manda na CAPI (sendLead).
+ *
+ * Envia dois pushes:
+ *  1. Meta: event='Lead'
+ *  2. GA4:  event='generate_lead'
+ *
+ * @param leadId - ID do lead devolvido pelo backend
+ */
+export function trackLead(leadId: string): void {
+  ensureDataLayer()
+
+  // Push 1 — Meta Pixel
+  window.dataLayer.push({
+    event: 'Lead',
+    event_id: `lead_${leadId}`,
+  })
+
+  // Push 2 — GA4
+  window.dataLayer.push({
+    event: 'generate_lead',
+  })
+}
 
 /**
  * Dispara CompleteRegistration — cadastro ou login bem-sucedido.
@@ -309,7 +370,7 @@ export function trackViewContent(product: ProductPayload): void {
 export function trackInitiateCheckout(product: ProductPayload): void {
   ensureDataLayer()
 
-  // Push 1 — Meta Pixel
+  // Push 1 — Meta Pixel (event_id = checkoutId, o mesmo que o backend usa na CAPI)
   window.dataLayer.push({
     event: 'InitiateCheckout',
     content_ids: [product.productId],
@@ -317,7 +378,7 @@ export function trackInitiateCheckout(product: ProductPayload): void {
     value: product.price,
     currency: 'BRL',
     num_items: 1,
-    event_id: crypto.randomUUID(),
+    event_id: product.eventId ?? crypto.randomUUID(),
   })
 
   // Push 2 — GA4 Enhanced Ecommerce
@@ -362,7 +423,7 @@ export function trackAddPaymentInfo(
     value: product.price,
     currency: 'BRL',
     payment_method: product.paymentMethod,
-    event_id: crypto.randomUUID(),
+    event_id: product.eventId ?? crypto.randomUUID(),
   })
 
   // Push 2 — GA4 Enhanced Ecommerce
@@ -389,39 +450,31 @@ export function trackAddPaymentInfo(
 /**
  * Dispara Purchase — pagamento confirmado.
  *
- * CRÍTICO: esta função gera um event_id único que DEVE ser
- * enviado ao backend para uso na Meta Conversions API (CAPI).
- * Sem o mesmo event_id em ambos (Pixel browser + CAPI server),
- * a Meta vai contar a conversão duas vezes.
+ * CRÍTICO: o eventId tem que ser o MESMO que o backend usa na CAPI.
+ * Esta função não gera ID: ela recebe o checkoutId criado quando o
+ * checkout abriu (newCheckoutId()) e que o backend salvou no banco.
+ * Se o backend manda o Purchase pelo webhook com um ID e o navegador
+ * manda com outro, a Meta conta duas vendas.
  *
  * Fluxo correto:
- *   1. Chame trackPurchase() → obtém { eventId }
- *   2. Inclua eventId no body do POST ao backend
- *   3. Backend inclui eventId no request da CAPI
+ *   1. Checkout abre → checkoutId = newCheckoutId()
+ *   2. POST ao backend leva checkoutId (o backend salva como capiEventId)
+ *   3. Pagamento confirmado → trackPurchase({ ..., eventId: checkoutId })
+ *   4. Webhook do backend manda CAPI Purchase com o capiEventId salvo
  *
  * Envia dois pushes:
  *  1. Meta: event='Purchase'
  *  2. GA4:  event='purchase' (dentro de ecommerce{})
  *
- * @param product - dados do produto, método de pagamento e ID da transação
- * @returns { eventId } — UUID gerado; envie ao backend para CAPI
+ * @param product - dados do produto, método de pagamento, ID da transação e eventId
+ * @returns { eventId } — o ID usado no push
  */
 export function trackPurchase(
-  product: ProductPayload & { paymentMethod: string; transactionId: string },
+  product: ProductPayload & { paymentMethod: string; transactionId: string; eventId: string },
 ): PurchaseTrackingResult {
   ensureDataLayer()
 
-  /**
-   * event_id: UUID gerado no browser NO MOMENTO do evento.
-   *
-   * Por que crypto.randomUUID() e não Date.now()?
-   * A Meta exige unicidade global por evento. UUIDs v4 têm 122 bits
-   * de aleatoriedade; timestamps podem colidir em alto volume.
-   *
-   * Este mesmo eventId deve viajar para o backend e ser incluído
-   * na chamada à Conversions API para que a Meta possa deduplica.
-   */
-  const eventId = crypto.randomUUID()
+  const eventId = product.eventId
 
   // Push 1 — Meta Pixel
   window.dataLayer.push({

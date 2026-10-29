@@ -1,8 +1,13 @@
 /**
  * debug-datalayer.js — Inspecionar o dataLayer em tempo real no console do browser
  *
- * USO: Cole este código no Console do DevTools (F12 > Console) e navegue pelo site.
+ * USO: Cole este código no Console do DevTools (F12 > Console) DEPOIS que a página
+ * carregou (o GTM precisa já estar no ar) e navegue pelo site.
  * Cada push ao dataLayer será logado com destaque visual.
+ *
+ * Por que "depois": o GTM troca o dataLayer.push pelo handler dele. Este script
+ * embrulha esse handler e repassa cada push para ele. Se fosse colado antes do
+ * GTM carregar, o GTM sobrescreveria o embrulho e nada seria logado.
  *
  * Comandos disponíveis depois de colar:
  *   dlDebug.history()    — ver todos os pushes desde que a página carregou
@@ -40,9 +45,15 @@
   // Guardar histórico de pushes
   const _history = [...window.dataLayer]; // pushes que já aconteceram
 
-  // Interceptar novos pushes
-  const _originalPush = Array.prototype.push;
+  // Interceptar novos pushes SEM tirar o GTM do caminho.
+  // O push atual já é o handler do GTM. Chamar Array.prototype.push aqui
+  // faria o GTM parar de receber eventos e as tags parariam de disparar.
+  const _gtmPush = window.dataLayer.push;
   let _intercepting = true;
+
+  if (!window.google_tag_manager) {
+    console.warn('[dlDebug] GTM ainda não carregou. Recarregue e cole de novo depois que a página terminar de carregar.');
+  }
 
   window.dataLayer.push = function(...args) {
     if (_intercepting) {
@@ -53,7 +64,7 @@
         }
       });
     }
-    return _originalPush.apply(this, args);
+    return _gtmPush.apply(window.dataLayer, args);
   };
 
   function logPush(item) {
@@ -156,7 +167,8 @@
 
     stop: () => {
       _intercepting = false;
-      console.log('[dlDebug] Interceptação parada. Recarregue a página para reiniciar.');
+      window.dataLayer.push = _gtmPush;
+      console.log('[dlDebug] Interceptação parada e push original do GTM restaurado.');
     },
 
     raw: () => window.dataLayer,

@@ -1,156 +1,103 @@
 # MCPs e APIs Oficiais para Rastreamento
 
-Guia sobre como usar Model Context Protocol (MCP) servers e APIs oficiais do Google e Meta para automatizar e gerenciar rastreamento com IA.
+Como usar as APIs oficiais do Google e da Meta, direto ou por um servidor MCP, para auditar e manter o rastreamento com o Claude.
 
 ---
 
 ## 1. O que são MCPs no contexto de rastreamento
 
-MCP (Model Context Protocol) é um protocolo aberto que permite que modelos de IA como Claude se conectem a serviços externos por meio de "servers" especializados. No contexto de rastreamento, MCPs permitem que Claude acesse diretamente as APIs do GTM, Meta e GA4, em vez de apenas ler código ou documentação.
+MCP (Model Context Protocol) é um protocolo aberto que permite que o Claude se conecte a serviços externos por meio de "servers". No rastreamento, um MCP deixa o Claude ler e mexer no GTM, no Meta e no GA4 em vez de só ler código.
 
-**Com MCPs de rastreamento, Claude pode:**
+**Com MCP, o Claude pode:**
 - Listar e inspecionar tags, triggers e variáveis de um container GTM
-- Criar variáveis DLV ou tags em massa sem o dev precisar clicar na interface
-- Consultar o Event Match Quality dos últimos dias direto no chat
-- Verificar se eventos CAPI estão chegando corretamente
+- Criar variáveis DLV ou tags em massa
+- Consultar quantos eventos `purchase` chegaram no GA4
 - Exportar a configuração do container para documentação
 
-**Sem MCP (situação atual mais comum):**
-Claude lê o código do projeto e orienta o dev a fazer as ações manualmente na interface.
+**Sem MCP:** o Claude lê o código do projeto, chama as APIs por script (com o seu token) ou orienta a fazer na interface.
 
-**Com MCP:**
-Claude executa as ações diretamente, o dev apenas confirma.
+**Antes de instalar um servidor MCP de terceiro:** confira quem mantém, quando foi atualizado e quais permissões ele pede. Ele vai receber um token com acesso à sua conta de anúncios ou ao seu container.
 
 ---
 
-## 2. Google Tag Manager — API e MCP
-
-### API oficial
+## 2. Google Tag Manager: API
 
 - **Nome**: Google Tag Manager API v2
 - **Tipo**: REST
 - **Endpoint base**: `https://tagmanager.googleapis.com/tagmanager/v2/`
-- **Autenticação**: Google OAuth 2.0 ou Service Account (recomendado para automação)
+- **Autenticação**: OAuth 2.0 ou conta de serviço (melhor para automação)
 - **Documentação**: https://developers.google.com/tag-manager/api/v2
 
 ### O que a API permite
 
-- Listar accounts, containers, workspaces
-- Listar, criar, atualizar e deletar: tags, triggers, variáveis, pastas
-- Publicar versões de container
-- Fazer preview de workspace
-- Exportar e importar containers (JSON)
+- Listar contas, containers e workspaces
+- Listar, criar, atualizar e apagar tags, triggers, variáveis e pastas
+- Criar e publicar versões do container
 
-### Configuração de Service Account
+### Conta de serviço
 
-1. Acesse Google Cloud Console → IAM & Admin → Service Accounts
-2. Crie uma service account para o projeto
-3. Baixe o arquivo JSON de credenciais
-4. No GTM: Admin → Gerenciar permissões de usuário → adicione o email da service account com permissão de "Publicar" ou "Editar"
-
-### Configuração MCP para GTM
-
-```json
-{
-  "mcpServers": {
-    "google-tag-manager": {
-      "command": "npx",
-      "args": ["-y", "@mcp/google-tag-manager"],
-      "env": {
-        "GTM_SERVICE_ACCOUNT_KEY": "/path/to/service-account.json",
-        "GTM_ACCOUNT_ID": "123456789",
-        "GTM_CONTAINER_ID": "GTM-XXXXXXX"
-      }
-    }
-  }
-}
-```
-
-**Nota:** o pacote `@mcp/google-tag-manager` é um exemplo de nomenclatura. Verifique os pacotes disponíveis no npm e no repositório oficial de servidores MCP (`github.com/modelcontextprotocol/servers`) — a comunidade cresce rapidamente e novos servidores são publicados com frequência.
+1. Google Cloud Console → IAM e administrador → Contas de serviço → criar
+2. Ative a Tag Manager API no projeto
+3. No GTM: Administrador → Gerenciamento de usuários → adicione o email da conta de serviço com a permissão necessária ("Editar" para criar, "Publicar" para publicar)
 
 ### Casos de uso com IA
 
 - "Liste todas as tags do container e me diga quais não têm trigger associado"
-- "Crie as 12 variáveis DLV padrão para Meta Pixel neste container"
-- "Exporte o container atual como JSON e salve em `docs/gtm-backup.json`"
-- "Verifique se existe uma tag para o evento Purchase com o 4º parâmetro eventID configurado"
-- "Publique a versão atual do workspace com a descrição: 'Adiciona rastreamento Meta CAPI'"
+- "Crie as DLVs padrão para Meta Pixel neste container"
+- "Verifique se todas as tags Meta passam `eventID` no 4º argumento do `fbq`"
+- "Confira se as tags GA4 de e-commerce têm 'Enviar dados de comércio eletrônico' marcado"
 
 ---
 
-## 3. Meta Business — Conversions API e MCP
+## 3. Meta: Graph API e Conversions API
 
-### API oficial
-
-- **Nome**: Meta Graph API (Conversions API — CAPI)
-- **Versão atual**: v19.0+
-- **Autenticação**: System User Access Token (System User no Business Manager)
+- **Versão**: `v26.0` em outubro de 2026. Cada versão vive cerca de 2 anos: https://developers.facebook.com/docs/graph-api/changelog/versions
+- **Autenticação**: token gerado no Events Manager (Configurações do pixel → Conversions API) ou de um usuário do sistema do Business Manager
 - **Documentação**: https://developers.facebook.com/docs/marketing-api/conversions-api
 
-### Endpoints relevantes
+### Endpoint principal
 
 | Endpoint | Método | Uso |
 |---|---|---|
-| `/{PIXEL_ID}/events` | POST | Enviar eventos para o CAPI |
-| `/{PIXEL_ID}/diagnostics` | GET | Verificar status e alertas do pixel |
-| `/{PIXEL_ID}/stats` | GET | Estatísticas de recebimento de eventos |
-| `/me/adaccounts` | GET | Listar contas de anúncio |
+| `/{PIXEL_ID}/events` | POST | Enviar eventos para a CAPI (até 1.000 por requisição) |
 
-### Verificar qualidade via API (curl de exemplo)
+Qualidade de correspondência (EMQ), cobertura de parâmetros e diagnósticos: confira no Events Manager. Os campos de leitura da API mudam entre versões; se for automatizar, valide contra a referência da versão que você usa.
 
-```bash
-curl -G \
-  "https://graph.facebook.com/v19.0/{PIXEL_ID}/diagnostics" \
-  --data-urlencode "access_token={ACCESS_TOKEN}" \
-  --data-urlencode "fields=events_missed_opportunity,event_match_quality"
-```
+### Tarefas que o Claude pode automatizar
 
-### Configuração MCP para Meta CAPI
-
-```json
-{
-  "mcpServers": {
-    "meta-capi": {
-      "command": "npx",
-      "args": ["-y", "@mcp/meta-business-api"],
-      "env": {
-        "META_ACCESS_TOKEN": "SEU_TOKEN_AQUI",
-        "META_PIXEL_ID": "SEU_PIXEL_ID"
-      }
-    }
-  }
-}
-```
-
-**Nota:** verifique os pacotes disponíveis — `@mcp/meta-business-api` é um exemplo de nomenclatura. Busque por "meta" ou "facebook" no repositório de servidores MCP da comunidade.
-
-### Tarefas que Claude pode automatizar via MCP
-
-- "Qual é o Event Match Quality do evento Purchase nos últimos 7 dias?"
-- "Liste todos os eventos recebidos ontem e compare com o esperado"
-- "Envie um evento de teste para verificar se o payload está correto"
-- "Verifique se há alertas de qualidade de dados no painel de diagnósticos"
-- "Mostre os campos de matching disponíveis por evento e suas taxas de cobertura"
+- "Mande um evento de teste com `test_event_code` e me mostre a resposta"
+- "Confira se o payload do Purchase tem `fbc`, `fbp`, `em`, `ph` e `client_user_agent`"
+- "Leia o `backend-capi.ts` e diga se o `event_id` do webhook é o mesmo do navegador"
 
 ---
 
-## 4. Google Analytics 4 — Data API e MCP
+## 4. Google Ads: conversões do CRM
 
-### API oficial
+- **API**: Data Manager API
+- **Endpoint**: `POST https://datamanager.googleapis.com/v1/events:ingest`
+- **Escopo OAuth**: `https://www.googleapis.com/auth/datamanager`
+- **Documentação**: https://developers.google.com/data-manager/api
+
+Desde 15/06/2026, quem está começando não consegue mais enviar conversão offline pela API do Google Ads: o caminho novo é a Data Manager API. O envio está pronto em `scripts/enviar-venda-crm.ts` e explicado em `crm-utms-e-vendas.md`.
+
+---
+
+## 5. Google Analytics 4: Data API
 
 - **Nome**: Google Analytics Data API v1
-- **Autenticação**: Google Service Account
+- **Autenticação**: conta de serviço
 - **Endpoint**: `https://analyticsdata.googleapis.com/v1beta/`
 - **Documentação**: https://developers.google.com/analytics/devguides/reporting/data/v1
 
+O Google também publicou um servidor MCP oficial para o GA4 (`google-analytics-mcp`), que usa essa API.
+
 ### Casos de uso para rastreamento
 
-- Verificar se o evento `purchase` está chegando no GA4 após mudanças no GTM
-- Comparar número de conversões GA4 vs Meta para identificar discrepâncias
-- Relatório automático de eventos por canal (organic, cpc, email)
-- Auditar se parâmetros de ecommerce (`value`, `transaction_id`) estão presentes nos eventos
+- Verificar se o evento `purchase` está chegando no GA4 depois de mudanças no GTM
+- Comparar conversões GA4 x Meta x vendas do CRM para achar discrepância
+- Auditar se `transaction_id` e `value` estão presentes nos eventos
 
-### Exemplo de consulta (via API)
+### Exemplo de consulta
 
 ```bash
 curl -X POST \
@@ -164,81 +111,62 @@ curl -X POST \
   }'
 ```
 
-### Autenticação com Service Account
+### Acesso da conta de serviço
 
-1. Google Cloud Console → mesmo projeto da GTM API
-2. Habilite a GA4 Data API
-3. Na interface GA4: Admin → Gerenciamento de acesso à conta → adicione o email da service account com permissão de "Visualizador"
+1. Google Cloud Console → mesmo projeto → ative a Google Analytics Data API
+2. No GA4: Administrador → Gerenciamento de acesso à propriedade → adicione o email da conta de serviço como "Leitor"
 
 ---
 
-## 5. Configuração no Claude Code (settings.json)
+## 6. Configuração no Claude Code
 
-O arquivo de configuração dos MCPs fica em `~/.claude/settings.json`. Exemplo com MCPs de rastreamento configurados:
+Servidores MCP **não** ficam no `~/.claude/settings.json`. Há dois jeitos:
 
+**Pelo terminal:**
+```bash
+claude mcp add nome-do-servidor -- comando argumentos
+```
+
+**Num arquivo `.mcp.json` na raiz do projeto** (compartilhado com o time pelo git):
 ```json
 {
   "mcpServers": {
-    "google-gtm": {
-      "command": "node",
-      "args": ["/path/to/gtm-mcp-server/index.js"],
+    "nome-do-servidor": {
+      "command": "comando",
+      "args": ["argumentos"],
       "env": {
-        "GOOGLE_APPLICATION_CREDENTIALS": "/home/user/.config/gcloud/service-account.json",
-        "GTM_ACCOUNT_ID": "123456789",
-        "GTM_CONTAINER_ID": "GTM-XXXXXXX"
-      }
-    },
-    "meta-business": {
-      "command": "node",
-      "args": ["/path/to/meta-mcp-server/index.js"],
-      "env": {
-        "META_ACCESS_TOKEN": "EAABxxx...",
-        "META_PIXEL_ID": "1234567890"
-      }
-    },
-    "google-analytics": {
-      "command": "node",
-      "args": ["/path/to/ga4-mcp-server/index.js"],
-      "env": {
-        "GOOGLE_APPLICATION_CREDENTIALS": "/home/user/.config/gcloud/service-account.json",
-        "GA4_PROPERTY_ID": "123456789"
+        "GOOGLE_APPLICATION_CREDENTIALS": "${GOOGLE_APPLICATION_CREDENTIALS}"
       }
     }
   }
 }
 ```
 
+Use `${VARIAVEL}` para ler do ambiente: assim o token não entra no arquivo nem no git.
+
 **Boas práticas de segurança:**
-- Nunca commite `settings.json` com tokens reais
-- Use variáveis de ambiente do sistema em vez de tokens diretos no JSON quando possível
-- Crie System Users na Meta com permissões mínimas necessárias (apenas o pixel, não a conta de anúncios toda)
+- Nunca commite token real em `.mcp.json` ou em qualquer arquivo
+- Dê ao token só o acesso necessário (o pixel, não a conta de anúncios toda)
 - Revogue tokens que não estão em uso
 
 ---
 
-## 6. Tarefas que Claude pode fazer com MCPs de rastreamento
+## 7. Tarefas que o Claude pode fazer
 
 ### Auditoria de container GTM
 
 - "Liste todas as tags do container. Quais estão desativadas? Quais não têm trigger?"
 - "Confirme que todas as tags Meta Pixel têm o 4º parâmetro `eventID` configurado com a variável DLV correta"
-- "Verifique se existe deduplicação: o event_id é enviado em todas as tags de conversão?"
 - "Mostre todas as variáveis DLV e confirme que os nomes batem com os campos do dataLayer do código"
 
-### Criação e manutenção de configurações
+### Criação e manutenção
 
 - "Crie as DLVs padrão para Meta Pixel neste container: event_id, value, currency, content_ids, content_type, num_items, transaction_id, payment_method, user"
-- "Adicione um trigger de Evento Personalizado para o evento 'AddToCart'"
-- "Atualize a tag Meta - Purchase para incluir o campo `content_name`"
+- "Crie a tag Meta - Advanced Matching no trigger user_identified"
+- "Adicione um trigger de Evento Personalizado para o evento 'Lead'"
 
-### Verificação de qualidade (Meta)
+### Relatórios e comparações
 
-- "Qual é o Event Match Quality do Purchase hoje? Está acima de 7?"
-- "Mostre os campos de user data sendo enviados e as taxas de cobertura por campo"
-- "Há eventos duplicados nos últimos 3 dias? Verificar se event_id está funcionando"
-
-### Relatórios e comparações (GA4)
-
-- "Compare o número de eventos `purchase` no GA4 com as confirmações de pagamento do banco de dados"
-- "Qual canal está gerando mais conversões esta semana?"
+- "Compare o número de eventos `purchase` no GA4 com as vendas do banco de dados"
+- "Some as vendas do CRM por `utm_campaign` e compare com as conversões de cada campanha no Google Ads"
 - "O parâmetro `transaction_id` está presente em todos os eventos de purchase do GA4?"

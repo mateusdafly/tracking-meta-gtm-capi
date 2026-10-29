@@ -17,7 +17,10 @@ Ublock Origin, Brave, AdGuard e outros bloqueiam requisições para domínios de
 O Safari limita cookies de 1st party criados via JavaScript a 7 dias. O cookie `_fbp` (identificador do navegador do pixel) é apagado antes do ciclo de vendas terminar em muitos casos. A Meta perde a capacidade de atribuir a conversão ao anúncio correto.
 
 **Usuário fecha a aba antes da confirmação — crítico para PIX**
-O fluxo PIX exige que o usuário abra o app do banco, copie a chave e confirme o pagamento em outro dispositivo ou aba. É comum o usuário fechar a aba do checkout antes de voltar. O evento `Purchase` do pixel (disparado na tela de sucesso) nunca é enviado. O CAPI disparado pelo webhook do Asaas garante 100% de cobertura independente do comportamento do browser.
+O fluxo PIX exige que o usuário abra o app do banco, copie a chave e confirme o pagamento em outro dispositivo ou aba. É comum o usuário fechar a aba do checkout antes de voltar. O evento `Purchase` do pixel (disparado na tela de sucesso) nunca é enviado. O CAPI disparado pelo webhook do gateway (Asaas, Stripe, Mercado Pago etc.) cobre esse caso, independente do comportamento do browser.
+
+**Venda que fecha fora do site**
+WhatsApp, telefone, vendedor: não existe página de sucesso. Só a CAPI leva essa venda ao Meta. Ver `crm-utms-e-vendas.md`.
 
 **Navegação SPA perde contexto de página**
 Em SPAs (React, Vue, Next.js), a URL muda sem recarga de página. GTM pode perder o contexto de `event_source_url`, a `fbclid` da URL original some do `fbc` após navegação, e o `dataLayer` pode não ser purgado corretamente entre "páginas". O server-side preserva os dados capturados no momento correto.
@@ -38,27 +41,30 @@ Em SPAs (React, Vue, Next.js), a URL muda sem recarga de página. GTM pode perde
 
 ## 2. Autenticação
 
-### Tipo de token correto: System User Access Token
+### Tipo de token correto
 
-Existem três tipos de tokens na API da Meta. Apenas um é correto para CAPI em produção:
+Para CAPI em produção, use um token que não expira e não depende de uma pessoa:
 
 | Tipo | Duração | Indicado para CAPI |
 |------|---------|-------------------|
-| User Token | 60 dias | Nao — expira |
-| Page Token | Variável | Nao — escopo errado |
-| **System User Token** | **Permanente** | **Sim** |
-
-O System User Token não expira e não está vinculado a uma conta de usuário individual (não é invalidado se um funcionário sair da empresa).
+| User Token | 60 dias | Não: expira |
+| Page Token | Variável | Não: escopo errado |
+| **Token gerado no Events Manager** | **Não expira** | **Sim, o caminho mais curto** |
+| **System User Token** | **Pode ser sem expiração** | **Sim** |
 
 ### Como gerar o token
 
-1. Acesse o **Meta Business Suite** (business.facebook.com)
-2. Menu lateral: **Configuracoes** → **Usuarios** → **Usuarios do Sistema**
-3. Clique em **Adicionar** → crie um System User com papel **Admin** ou **Funcionario**
-4. Clique no usuario criado → **Gerar novo token**
-5. Selecione o app vinculado ao pixel
-6. Permissoes necessárias: `ads_management` OU `conversions_api` (a segunda é suficiente para CAPI)
-7. Copie o token — ele só é exibido uma vez
+**Pelo Events Manager (mais simples):**
+1. Events Manager → selecione o pixel (conjunto de dados)
+2. Aba **Configurações** → seção **Conversions API**
+3. **Gerar token de acesso**
+4. Copie o token: ele só é exibido uma vez
+
+**Por um usuário do sistema (quando várias integrações usam o mesmo Business Manager):**
+1. Business Manager → **Configurações do negócio** → **Usuários** → **Usuários do sistema**
+2. Crie o usuário do sistema e dê a ele acesso ao pixel
+3. **Gerar novo token**, escolha o app e a permissão `ads_management`
+4. Copie o token: ele só é exibido uma vez
 
 ### Variáveis de ambiente obrigatórias
 
@@ -66,6 +72,7 @@ O System User Token não expira e não está vinculado a uma conta de usuário i
 META_CAPI_PIXEL_ID=123456789012345
 META_CAPI_ACCESS_TOKEN=EAAxxxxxxxxxxxxxxx
 META_CAPI_TEST_CODE=          # deixar vazio em producao
+META_GRAPH_API_VERSION=v26.0  # opcional
 ```
 
 **NUNCA commitar o access token.** Adicionar ao `.gitignore`:
@@ -85,20 +92,21 @@ git log --all -p | grep -i "EAA"
 ## 3. Endpoint da API
 
 ```
-POST https://graph.facebook.com/v19.0/{PIXEL_ID}/events
+POST https://graph.facebook.com/v26.0/{PIXEL_ID}/events
 ```
 
 **Observacoes importantes:**
 
-- A versao da API (`v19.0`) deve ser travada no código — nunca usar `vLatest`
-- O `access_token` é passado como **query parameter**, não como header `Authorization`
-- A Meta não retorna erro 401 com header — retorna 200 com body de erro se o token for inválido
+- Trave a versão da API no código (`v26.0` em outubro de 2026), de preferência numa variável de ambiente. Cada versão vive cerca de 2 anos; confira o calendário em https://developers.facebook.com/docs/graph-api/changelog/versions
+- O `access_token` é passado como **query parameter**. Por isso, nunca logue a URL da requisição
+- Erros voltam com status HTTP 4xx e um objeto `error` no corpo (ex: `code: 190` = token inválido ou expirado). Trate os dois: status e corpo
 - `Content-Type: application/json`
-- Método: sempre `POST` (mesmo para "consultas")
+- Método: sempre `POST`
+- Até 1.000 eventos por requisição
 
 Exemplo completo da URL montada:
 ```
-https://graph.facebook.com/v19.0/123456789012345/events?access_token=EAAxxxxx
+https://graph.facebook.com/v26.0/123456789012345/events?access_token=EAAxxxxx
 ```
 
 ---
@@ -111,24 +119,24 @@ https://graph.facebook.com/v19.0/123456789012345/events?access_token=EAAxxxxx
     {
       "event_name": "Purchase",
       "event_time": 1710000000,
-      "event_id": "checkout-abc123-purchase",
+      "event_id": "3f6c1a9e-checkout-uuid",
       "action_source": "website",
       "event_source_url": "https://seu-site.com/checkout",
       "user_data": {
-        "em": "b4c9a289323b21a01c3e940f150eb9b8c542587f8f6f2b8d968ffa7a7b462e05",
-        "ph": "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8",
-        "fn": "7f722ac73879e33a2f8e8d0c6f12fcf1fba1d9e2b1a0c9d8e7f6a5b4c3d2e1f",
-        "ln": "a9f0e61a8c8c4de7a8a5b9b3c2d1e0f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2",
-        "external_id": "3d2e1f0a9b8c7d6e5f4a3b2c1d0e9f8a7b6c5d4e3f2a1b0c9d8e7f6a5b4c3d",
+        "em": "973dfe463ec85785f5f95af5ba3906eedb2d931c24e69824a89ea65dba4e813b",
+        "ph": "a869177964cc68954ffec997bbad30769f8a5a6fdc60f296ddbc60b9347dc416",
+        "fn": "ed2befb11499489e2570cb053f774b8ed93e89eddab3f78867a2a5f32c58845e",
+        "ln": "d24e913a4107af875dc2ac3d419798f3794d00434e5059fbb68ac8d33626eaee",
+        "external_id": "ca010ec7feb32be7e30002f602d7c2ab062fb7a2be105ae6b8b1fb739cb72c77",
         "fbp": "fb.1.1234567890123.1234567890",
         "fbc": "fb.1.1234567890123.IwAR2xxxxxxxxxxxxxxxxxxx",
         "client_ip_address": "177.100.200.50",
         "client_user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
       },
       "custom_data": {
-        "value": 47.90,
+        "value": 197.00,
         "currency": "BRL",
-        "content_ids": ["kit-completo"],
+        "content_ids": ["produto-exemplo"],
         "content_type": "product",
         "num_items": 1,
         "order_id": "PAY_12345"
@@ -141,23 +149,23 @@ https://graph.facebook.com/v19.0/123456789012345/events?access_token=EAAxxxxx
 
 **Observacoes sobre o payload:**
 
-- `data` é sempre um array — permite enviar múltiplos eventos em batch (raramente necessário)
-- `event_time` é Unix timestamp em segundos (não milissegundos)
-- `test_event_code` deve ser **removido** em produção — se presente com código válido, o evento vai apenas para Test Events, não para o pixel de produção
-- Apenas um evento pode ser enviado por chamada quando usar `test_event_code`
+- Os hashes acima são reais: `test@example.com`, `5511999999999`, `joao`, `silva` e `usr_123`, já normalizados
+- `data` é sempre um array: permite enviar até 1.000 eventos por requisição
+- `event_time` é Unix timestamp em segundos (não milissegundos), e é a hora em que o evento **aconteceu**, não a do envio. No máximo 7 dias atrás: se um evento da requisição for mais velho, a Meta recusa a requisição inteira (venda presencial com `action_source: physical_store` aceita até 62 dias)
+- `test_event_code` deve ser **removido** em produção. O evento com código de teste aparece em Test Events **e não é descartado**: entra nos dados do pixel e é usado para segmentação e mensuração
 
 ---
 
 ## 5. Regras de hashing
 
-A Meta exige que dados PII (Personally Identifiable Information) sejam hasheados com SHA-256 antes de serem enviados. O hashing deve ser feito **server-side**, nunca no browser.
+A Meta exige que dados PII (Personally Identifiable Information) sejam hasheados com SHA-256 antes de serem enviados pela CAPI. No servidor, o hash é obrigatório. No navegador, o pixel aceita o dado com hash ou sem (sem hash, ele mesmo calcula); se você hashear no navegador, use exatamente a mesma normalização do servidor.
 
 ### Campos que DEVEM ser hasheados (SHA-256)
 
 | Campo | Chave na API | Normalizacao antes do hash |
 |-------|-------------|--------------------------|
 | Email | `em` | trim() + toLowerCase() |
-| Telefone | `ph` | formato E.164 (ex: +5511999999999) → remover `+` |
+| Telefone | `ph` | só dígitos, com DDI, sem `+` (ex: 5511999999999) |
 | Primeiro nome | `fn` | trim() + toLowerCase() |
 | Ultimo nome | `ln` | trim() + toLowerCase() |
 | Cidade | `ct` | trim() + toLowerCase() |
@@ -215,10 +223,14 @@ function normalizePhone(phone: string): string {
 
 ### Verificacao de hashing correto
 
-Para validar que o hashing está correto, use a [ferramenta de teste da Meta](https://developers.facebook.com/tools/payload_helper/). O hash de `test@example.com` deve ser:
-```
-55e79200c1635b37a54f3d805c5d63b7af6ca86f13a75cf847edec44a79e4e33
-```
+Para validar que o hashing está correto, use a [ferramenta de teste da Meta](https://developers.facebook.com/tools/payload_helper/) ou compare com valores conhecidos:
+
+| Entrada já normalizada | SHA-256 |
+|---|---|
+| `test@example.com` | `973dfe463ec85785f5f95af5ba3906eedb2d931c24e69824a89ea65dba4e813b` |
+| `5511999999999` | `a869177964cc68954ffec997bbad30769f8a5a6fdc60f296ddbc60b9347dc416` |
+
+Confira no terminal: `printf '%s' 'test@example.com' | sha256sum`
 
 ---
 
@@ -247,6 +259,10 @@ app.post('/api/webhooks/asaas', async (req, res) => {
   })
 })
 ```
+
+### Serverless
+
+Em Vercel, Lambda ou Cloud Run com CPU só durante a requisição, o trabalho que continua depois da resposta pode ser cortado e o evento nunca sai. Nesses ambientes, use o `waitUntil` da plataforma ou mande o evento para uma fila.
 
 ### Por que nao usar await
 
@@ -316,9 +332,10 @@ model Payment {
 // No componente de checkout, antes de enviar para o backend
 function getCapiContext() {
   return {
-    capiEventId: crypto.randomUUID(), // ID unico para este evento
+    capiEventId: checkoutId, // o MESMO ID usado nos pushes do dataLayer
     fbp: getCookie('_fbp') ?? undefined,
-    fbc: getCookie('_fbc') ?? getUrlParam('fbclid') ?? undefined,
+    // fbc tem formato próprio: fb.1.{timestamp_ms}.{fbclid}. O fbclid cru NÃO serve.
+    fbc: getCookie('_fbc') ?? (getUrlParam('fbclid') ? `fb.1.${Date.now()}.${getUrlParam('fbclid')}` : undefined),
     // ip e userAgent sao capturados pelo backend via req.headers
   }
 }
@@ -397,7 +414,7 @@ sendPurchase({
 
 ### Como funciona
 
-Quando o pixel browser e a CAPI enviam o mesmo evento, a Meta usa o `event_id` para deduplicar. Se dois eventos chegarem com o mesmo `event_id` dentro de uma janela de **48 horas**, apenas um é contabilizado.
+Quando o pixel browser e a CAPI enviam o mesmo evento, a Meta deduplica quando **`event_name` e `event_id` são iguais** e chegam dentro de **48 horas** do primeiro evento com aquele `event_id`. Só o `event_id` igual não basta: o nome do evento também tem que bater.
 
 ```
 Browser pixel (GTM)   --[event_id: "checkout-abc123-purchase"]--> Meta
@@ -434,7 +451,7 @@ Todos os três devem usar o **mesmo `event_id`**. A Meta deduplica automaticamen
 
 ### Evento sem capiEventId no banco
 
-Se o campo `capiEventId` for `null` no banco (checkout antigo, antes da feature), gerar um novo UUID é aceitável, pois não haverá deduplicação com o pixel (o pixel também não teve o event_id). O evento é melhor do que nenhum evento.
+Se o campo `capiEventId` for `null` no banco (checkout antigo, antes da feature), use um ID determinístico como `purchase_{orderId}`. Assim o polling e o webhook geram o mesmo ID e a Meta conta uma venda só. Um UUID novo em cada canal contaria duas.
 
 ---
 
@@ -482,7 +499,7 @@ Após enviar um evento de teste, ele aparece no painel em **tempo real** (latên
 
 ### Remover em producao
 
-Em produção, o campo `test_event_code` no payload faz o evento ir APENAS para o painel de testes, sem ser processado como conversão real. Garantir que a variável de ambiente esteja vazia antes do deploy.
+Em produção, deixe a variável vazia. O evento com `test_event_code` **não é descartado**: ele aparece em Test Events e também entra nos dados do pixel (segmentação e mensuração). Por isso, faça poucos testes no pixel de produção, ou use um pixel separado para testar.
 
 ---
 
@@ -533,3 +550,27 @@ Ordem de importância (da mais para a menos impactante):
 3. Clicar no evento para ver breakdown por campo
 
 Para eventos individuais durante desenvolvimento, usar o painel de Test Events que mostra o EMQ estimado para cada evento enviado.
+
+---
+
+## 11. Venda confirmada depois: event_time e action_source
+
+**`event_time` é quando a venda aconteceu.** Webhook que chega minutos depois, venda marcada no CRM dias depois: mande a hora real, não a hora do envio.
+
+**Limite de 7 dias.** A Meta aceita `event_time` de até 7 dias atrás. Se um evento da requisição for mais velho, ela recusa a requisição inteira e nenhum evento é processado. O `scripts/backend-capi.ts` falha antes de mandar, com mensagem clara. Venda presencial (`physical_store`) aceita até 62 dias.
+
+**`action_source` diz onde a conversão aconteceu:**
+
+| Valor | Quando usar |
+|---|---|
+| `website` | conversão no site (exige `client_user_agent`) |
+| `chat` | WhatsApp, direct, chat |
+| `phone_call` | telefone |
+| `physical_store` | presencial, na loja ou no consultório |
+| `email` | por email |
+| `system_generated` | automática, ex: renovação de assinatura |
+| `business_messaging` | anúncio de clique para Messenger, Instagram ou WhatsApp |
+| `app` | app móvel |
+| `other` | nenhum dos anteriores |
+
+Todos os valores servem para mensuração, públicos e otimização. Para a venda que fecha no CRM, o fluxo completo (UTMs, IDs de clique, Google) está em `crm-utms-e-vendas.md`.

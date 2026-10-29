@@ -61,7 +61,7 @@ initDataLayer();
  *
  * Exemplo:
  *   sha256Hash('joao@exemplo.com').then(hash => console.log(hash))
- *   // "a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3"
+ *   // "7f32bc621b0f045c9ee21cd6a74bd09b3478062ab8f71e215ac1d201b702b0e9"
  */
 async function sha256Hash(texto) {
   // Normaliza: minúsculas e sem espaços nas bordas
@@ -82,31 +82,33 @@ async function sha256Hash(texto) {
 
 /**
  * normalizarTelefone(telefone)
- * Converte um número de telefone para o formato E.164.
+ * Deixa o telefone no formato que a META espera antes do hash:
+ * só dígitos, com DDI, SEM o "+". Exemplos: 5511999999999, 5521999999999
  *
- * O formato E.164 é exigido pela Meta para o campo `ph` (phone).
- * Exemplos: +5511999999999, +5521999999999
+ * O "+" muda o hash: "+5511999999999" e "5511999999999" geram hashes
+ * diferentes, e só o segundo bate com o da Meta.
+ * (O Google é o contrário: quer o "+". Ver pii-hashing.md.)
  *
  * @param {string} telefone - número em qualquer formato
- * @param {string} ddi - código do país (padrão: '55' para Brasil)
- * @returns {string} número no formato E.164
+ * @param {string} ddi - código do país usado quando o número vem sem DDI (padrão: '55')
+ * @returns {string} só dígitos, com DDI
  */
 function normalizarTelefone(telefone, ddi = '55') {
-  // Remove tudo que não for número
-  const apenasDigitos = telefone.replace(/\D/g, '');
+  const veioComMais = telefone.trim().startsWith('+');
+  let digitos = telefone.replace(/\D/g, '');
 
-  // Já tem DDI do Brasil (começa com 55, 12 ou 13 dígitos)
-  if (apenasDigitos.startsWith('55') && (apenasDigitos.length === 12 || apenasDigitos.length === 13)) {
-    return '+' + apenasDigitos;
+  // Veio com "+": o DDI já está no número
+  if (veioComMais) return digitos;
+
+  // Já tem DDI do Brasil (55 + DDD + número = 12 ou 13 dígitos)
+  if (digitos.startsWith('55') && (digitos.length === 12 || digitos.length === 13)) {
+    return digitos;
   }
 
-  // Número brasileiro sem DDI (10 ou 11 dígitos: DDD + número)
-  if (apenasDigitos.length === 10 || apenasDigitos.length === 11) {
-    return '+' + ddi + apenasDigitos;
-  }
+  // Remove o 0 de discagem de longa distância
+  if (digitos.startsWith('0')) digitos = digitos.slice(1);
 
-  // Outros casos: apenas adiciona o +
-  return '+' + apenasDigitos;
+  return ddi + digitos;
 }
 
 /**
@@ -116,7 +118,12 @@ function normalizarTelefone(telefone, ddi = '55') {
  * - _fbp: cookie gerado pelo Meta Pixel ao carregar na página
  *         Identifica o browser do visitante
  * - _fbc: gerado quando o visitante clicou em um anúncio Meta
- *         Contém o parâmetro fbclid da URL
+ *         Formato: fb.1.{timestamp_ms}.{fbclid}
+ *
+ * Se o _fbc não existe (pixel bloqueado) mas a URL tem fbclid, monta o fbc
+ * no formato certo. O fbclid cru não serve como fbc, e o valor nunca pode ter
+ * maiúsculas/minúsculas alteradas. Para não perder o fbclid na navegação,
+ * use scripts/captura-origem.js na primeira página.
  *
  * Esses valores melhoram a qualidade do match na Conversions API (CAPI).
  *
@@ -124,17 +131,33 @@ function normalizarTelefone(telefone, ddi = '55') {
  */
 function lerCookiesMeta() {
   const cookies = document.cookie.split('; ').reduce(function(acc, cookie) {
-    const partes = cookie.split('=');
-    if (partes[0] && partes[1]) {
-      acc[partes[0].trim()] = decodeURIComponent(partes[1]);
+    const i = cookie.indexOf('=');
+    if (i > 0) {
+      acc[cookie.slice(0, i).trim()] = decodeURIComponent(cookie.slice(i + 1));
     }
     return acc;
   }, {});
 
+  let fbc = cookies['_fbc'] || null;
+  if (!fbc) {
+    const fbclid = new URLSearchParams(window.location.search).get('fbclid');
+    if (fbclid) fbc = 'fb.1.' + Date.now() + '.' + fbclid;
+  }
+
   return {
     fbp: cookies['_fbp'] || null,
-    fbc: cookies['_fbc'] || null,
+    fbc: fbc,
   };
+}
+
+/**
+ * novoCheckoutId()
+ * Gera o ID do checkout. Chame UMA vez quando o checkout abrir, guarde,
+ * mande ao backend no POST que cria o pagamento e passe o mesmo valor como
+ * `eventId` em InitiateCheckout, AddPaymentInfo e Purchase.
+ */
+function novoCheckoutId() {
+  return crypto.randomUUID();
 }
 
 // ---------------------------------------------------------------------------
@@ -160,18 +183,19 @@ function lerCookiesMeta() {
  * @param {string} dadosUsuario.primeiroNome - primeiro nome (texto puro)
  * @param {string} dadosUsuario.sobrenome   - sobrenome (texto puro)
  * @param {string} dadosUsuario.telefone    - telefone em qualquer formato
- * @param {string} dadosUsuario.userId      - ID único no sistema (NÃO hasheado)
+ * @param {string} dadosUsuario.userId      - ID único no sistema (hasheado, igual ao backend)
  */
 async function setUser(dadosUsuario) {
   const telefonePadronizado = normalizarTelefone(dadosUsuario.telefone);
   const cookiesMeta = lerCookiesMeta();
 
   // Hasheia todos os dados pessoais em paralelo para performance
-  const [emailHash, fnHash, lnHash, phoneHash] = await Promise.all([
+  const [emailHash, fnHash, lnHash, phoneHash, userIdHash] = await Promise.all([
     sha256Hash(dadosUsuario.email),
     sha256Hash(dadosUsuario.primeiroNome),
     sha256Hash(dadosUsuario.sobrenome),
     sha256Hash(telefonePadronizado),
+    sha256Hash(String(dadosUsuario.userId)),
   ]);
 
   const objetoUser = {
@@ -179,20 +203,47 @@ async function setUser(dadosUsuario) {
     fn: fnHash,
     ln: lnHash,
     phone: phoneHash,
-    external_id: dadosUsuario.userId, // ID interno: NÃO hasheia
+    external_id: userIdHash, // mesmo hash que o backend manda na CAPI
   };
 
   // Adiciona cookies do Meta Pixel se disponíveis
   if (cookiesMeta.fbp) objetoUser.fbp = cookiesMeta.fbp;
   if (cookiesMeta.fbc) objetoUser.fbc = cookiesMeta.fbc;
 
-  window.dataLayer.push({ user: objetoUser });
+  // event 'user_identified' dispara a tag de Advanced Matching (ver gtm-setup.md)
+  window.dataLayer.push({ event: 'user_identified', user: objetoUser });
   console.log('[Tracking] Usuário setado no dataLayer');
 }
 
 // ---------------------------------------------------------------------------
 // EVENTOS DO FUNIL
 // ---------------------------------------------------------------------------
+
+/**
+ * trackLead(idLead)
+ * Dispara o evento de formulário de contato enviado.
+ *
+ * Chame DEPOIS que o backend respondeu com o ID do lead, para usar o mesmo
+ * event_id que o backend manda na CAPI: 'lead_' + idLead.
+ *
+ * Envia dois pushes:
+ *   1. Meta Pixel: event='Lead'
+ *   2. GA4:        event='generate_lead'
+ *
+ * @param {string} idLead - ID do lead devolvido pelo backend
+ */
+function trackLead(idLead) {
+  window.dataLayer.push({
+    event: 'Lead',
+    event_id: 'lead_' + idLead,
+  });
+
+  window.dataLayer.push({
+    event: 'generate_lead',
+  });
+
+  console.log('[Tracking] Lead disparado:', idLead);
+}
 
 /**
  * trackCompleteRegistration(opcoes)
@@ -247,9 +298,9 @@ function trackCompleteRegistration(opcoes) {
  *   2. GA4:        event='view_item' (dentro de ecommerce{})
  *
  * @param {Object} produto
- * @param {string} produto.id     - ID único do produto (ex: 'kit-completo')
+ * @param {string} produto.id     - ID único do produto (ex: 'produto-exemplo')
  * @param {string} produto.nome   - nome do produto
- * @param {number} produto.preco  - preço em reais (ex: 47.90)
+ * @param {number} produto.preco  - preço em reais (ex: 197.00)
  */
 function trackViewContent(produto) {
   // Push 1 — Meta Pixel
@@ -301,6 +352,7 @@ function trackViewContent(produto) {
  * @param {string} produto.id    - ID único do produto
  * @param {string} produto.nome  - nome do produto
  * @param {number} produto.preco - preço em reais
+ * @param {string} produto.eventId - checkoutId (novoCheckoutId()), o mesmo que vai ao backend
  */
 function trackInitiateCheckout(produto) {
   // Push 1 — Meta Pixel
@@ -311,7 +363,7 @@ function trackInitiateCheckout(produto) {
     value: produto.preco,
     currency: 'BRL',
     num_items: 1,
-    event_id: crypto.randomUUID(),
+    event_id: produto.eventId || crypto.randomUUID(),
   });
 
   // Push 2 — GA4 Enhanced Ecommerce
@@ -352,6 +404,7 @@ function trackInitiateCheckout(produto) {
  * @param {string} produto.nome            - nome do produto
  * @param {number} produto.preco           - preço em reais
  * @param {string} produto.metodoPagamento - 'PIX' ou 'credit_card'
+ * @param {string} produto.eventId         - checkoutId, o mesmo do InitiateCheckout
  */
 function trackAddPaymentInfo(produto) {
   // Push 1 — Meta Pixel
@@ -362,7 +415,7 @@ function trackAddPaymentInfo(produto) {
     value: produto.preco,
     currency: 'BRL',
     payment_method: produto.metodoPagamento,
-    event_id: crypto.randomUUID(),
+    event_id: produto.eventId || crypto.randomUUID(),
   });
 
   // Push 2 — GA4 Enhanced Ecommerce
@@ -391,20 +444,18 @@ function trackAddPaymentInfo(produto) {
  * Dispara o evento de compra confirmada.
  *
  * ATENÇÃO — Deduplicação com CAPI:
- *   Esta função gera um event_id único. Para que a Meta não conte
- *   a mesma compra duas vezes (Pixel browser + CAPI server-side),
- *   você DEVE enviar este mesmo event_id para o seu backend.
- *   O backend inclui o event_id no request da Conversions API.
+ *   Esta função NÃO gera ID. Ela usa o checkoutId criado quando o checkout
+ *   abriu (novoCheckoutId()) e que o backend já salvou no banco junto com o
+ *   pagamento. O webhook do backend manda o Purchase pela CAPI com esse mesmo
+ *   ID, e a Meta conta uma compra só. Se o navegador gerasse um ID novo aqui,
+ *   a Meta contaria duas.
  *
  *   Exemplo de fluxo:
- *     const resultado = await trackPurchase({ ... });
- *     await fetch('/api/confirmar-pagamento', {
- *       method: 'POST',
- *       body: JSON.stringify({
- *         pagamentoId: 'PAY_123',
- *         eventId: resultado.eventId, // <-- essencial!
- *       })
- *     });
+ *     var checkoutId = novoCheckoutId();              // checkout abriu
+ *     await fetch('/api/checkout', { method: 'POST',
+ *       body: JSON.stringify({ checkoutId: checkoutId, ... }) });
+ *     // ... pagamento confirmado ...
+ *     trackPurchase({ ..., eventId: checkoutId });
  *
  * Envia dois pushes:
  *   1. Meta Pixel: event='Purchase'
@@ -416,20 +467,16 @@ function trackAddPaymentInfo(produto) {
  * @param {number} produto.preco           - preço em reais
  * @param {string} produto.metodoPagamento - 'PIX' ou 'credit_card'
  * @param {string} produto.idTransacao     - ID do pagamento no gateway
- * @returns {{ eventId: string }} event_id gerado — envie ao backend para CAPI
+ * @param {string} produto.eventId         - checkoutId salvo no backend (obrigatório)
+ * @returns {{ eventId: string }} o event_id usado no push
  */
 function trackPurchase(produto) {
-  /**
-   * event_id: identificador único para este evento de conversão.
-   *
-   * O mesmo event_id deve ir para:
-   *   - Este push no dataLayer (Meta Pixel browser-side vai usar)
-   *   - O backend via API (CAPI server-side vai usar)
-   *
-   * Com o mesmo event_id nos dois lugares, a Meta sabe que são
-   * o mesmo evento e conta apenas uma conversão.
-   */
-  var eventId = crypto.randomUUID();
+  if (!produto.eventId) {
+    // Sem o ID do backend, o pixel e a CAPI contariam a venda duas vezes
+    console.error('[Tracking] trackPurchase sem eventId: passe o checkoutId salvo no backend.');
+    return { eventId: null };
+  }
+  var eventId = produto.eventId;
 
   // Push 1 — Meta Pixel
   window.dataLayer.push({
@@ -503,9 +550,9 @@ async function exemploLoginBemSucedido() {
  */
 function exemploVerProduto() {
   trackViewContent({
-    id: 'kit-completo',        // placeholder — substitua pelo ID real
-    nome: 'Kit Premium',       // placeholder — substitua pelo nome real
-    preco: 47.90,
+    id: 'produto-exemplo',        // placeholder — substitua pelo ID real
+    nome: 'Produto Exemplo',       // placeholder — substitua pelo nome real
+    preco: 197.00,
   });
 }
 
@@ -516,9 +563,9 @@ function exemploVerProduto() {
  */
 function exemploCliqueComprar() {
   trackInitiateCheckout({
-    id: 'kit-completo',
-    nome: 'Kit Premium',
-    preco: 47.90,
+    id: 'produto-exemplo',
+    nome: 'Produto Exemplo',
+    preco: 197.00,
   });
   // Após isso: abrir modal de checkout, redirecionar para página de pagamento, etc.
 }
@@ -532,9 +579,9 @@ function exemploCliqueComprar() {
  */
 function aoClicarComprar() {
   trackInitiateCheckout({
-    id: 'kit-completo',
-    nome: 'Kit Premium',
-    preco: 47.90,
+    id: 'produto-exemplo',
+    nome: 'Produto Exemplo',
+    preco: 197.00,
   });
   // Mostrar checkout inline, redirecionar, etc.
 }
@@ -546,41 +593,31 @@ function aoClicarComprar() {
  * Na prática, etapas diferentes são chamadas em momentos diferentes.
  */
 async function exemploFluxoCompletoPIX() {
+  // Checkout abriu: um ID só para o checkout inteiro
+  var checkoutId = novoCheckoutId();
+  // await fetch('/api/checkout', { method: 'POST',
+  //   body: JSON.stringify({ checkoutId: checkoutId, produto: 'produto-exemplo' }) });
+
   // Usuário escolheu PIX como pagamento
   trackAddPaymentInfo({
-    id: 'kit-completo',
-    nome: 'Kit Premium',
-    preco: 47.90,
+    eventId: checkoutId,
+    id: 'produto-exemplo',
+    nome: 'Produto Exemplo',
+    preco: 197.00,
     metodoPagamento: 'PIX',
   });
 
   // ... usuário vê QR code e paga ...
 
-  // Backend confirmou o pagamento via webhook
-  var resultado = trackPurchase({
-    id: 'kit-completo',
-    nome: 'Kit Premium',
-    preco: 47.90,
+  // Polling mostrou que o backend confirmou o pagamento
+  trackPurchase({
+    eventId: checkoutId, // o mesmo ID que o webhook usa na CAPI
+    id: 'produto-exemplo',
+    nome: 'Produto Exemplo',
+    preco: 197.00,
     metodoPagamento: 'PIX',
     idTransacao: 'PAY_abc123', // ID do gateway de pagamento
   });
-
-  /**
-   * CRÍTICO: envie o eventId para o backend.
-   * O backend vai incluir este mesmo ID no request da CAPI,
-   * permitindo que a Meta deduplique (evite contar duas vezes).
-   */
-  console.log('Enviar ao backend: event_id =', resultado.eventId);
-
-  // Exemplo de como enviar ao backend:
-  // await fetch('/api/registrar-conversao', {
-  //   method: 'POST',
-  //   headers: { 'Content-Type': 'application/json' },
-  //   body: JSON.stringify({
-  //     pagamentoId: 'PAY_abc123',
-  //     eventId: resultado.eventId,
-  //   }),
-  // });
 }
 
 // ---------------------------------------------------------------------------
@@ -604,6 +641,7 @@ async function exemploFluxoCompletoPIX() {
  *    - DLV - ecommerce         (objeto completo para GA4)
  *
  * 2. TRIGGERS — crie um trigger "Custom Event" para cada evento:
+ *    - user_identified (Advanced Matching)
  *    - ViewContent
  *    - CompleteRegistration
  *    - InitiateCheckout
@@ -612,9 +650,10 @@ async function exemploFluxoCompletoPIX() {
  *
  * 3. TAGS:
  *    - Tag do Meta Pixel: use as variáveis DLV nos campos do evento
- *      Configure Advanced Matching com as variáveis de user.*
- *      Defina o Event ID com a variável DLV - event_id
- *    - Tag do GA4 Event: use a variável DLV - ecommerce para Enhanced Ecommerce
+ *      Defina o Event ID com a variável DLV - event_id (4º argumento do fbq)
+ *    - Tag "Meta - Advanced Matching" no trigger user_identified (ver gtm-setup.md)
+ *    - Tag do GA4 Event: marque "Enviar dados de comércio eletrônico" com origem
+ *      "Camada de dados" (lê o objeto ecommerce sozinho)
  *
  * Consulte a documentação do GTM para detalhes de configuração de cada tag.
  */

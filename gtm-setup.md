@@ -49,6 +49,8 @@ Todos os triggers abaixo são do tipo **Evento Personalizado**. O campo "Nome do
 
 | Nome do Trigger no GTM | Tipo | Nome do evento |
 |---|---|---|
+| CE - user_identified | Evento Personalizado | `user_identified` |
+| CE - Lead | Evento Personalizado | `Lead` |
 | CE - Purchase (Meta) | Evento Personalizado | `Purchase` |
 | CE - InitiateCheckout | Evento Personalizado | `InitiateCheckout` |
 | CE - AddPaymentInfo | Evento Personalizado | `AddPaymentInfo` |
@@ -57,6 +59,7 @@ Todos os triggers abaixo são do tipo **Evento Personalizado**. O campo "Nome do
 | CE - purchase (GA4) | Evento Personalizado | `purchase` |
 | CE - begin_checkout (GA4) | Evento Personalizado | `begin_checkout` |
 | CE - add_payment_info (GA4) | Evento Personalizado | `add_payment_info` |
+| CE - generate_lead (GA4) | Evento Personalizado | `generate_lead` |
 
 **Atenção:** Meta usa CamelCase (`Purchase`, `InitiateCheckout`), GA4 usa snake_case (`purchase`, `begin_checkout`). São triggers separados mesmo que o evento seja semanticamente o mesmo.
 
@@ -82,6 +85,41 @@ fbq('track', 'NomeDoEvento', { /* dados */ }, { eventID: '...' });
 ```
 
 Se o `eventID` não for passado, o CAPI e o pixel vão criar eventos duplicados no Events Manager.
+
+### Tag: Advanced Matching
+
+O objeto `user` do dataLayer não vai sozinho para o pixel. Esta tag passa os valores (já com hash) para o `fbq`.
+
+- **Nome da tag**: `Meta - Advanced Matching`
+- **Trigger**: `CE - user_identified`
+
+```html
+<script>
+  var u = {{DLV - user_data}} || {};
+  var dados = {};
+  if (u.email) dados.em = u.email;
+  if (u.phone) dados.ph = u.phone;
+  if (u.fn) dados.fn = u.fn;
+  if (u.ln) dados.ln = u.ln;
+  if (u.external_id) dados.external_id = u.external_id;
+  fbq('init', 'SEU_PIXEL_ID', dados);
+</script>
+```
+
+Chamar `fbq('init')` de novo com o mesmo pixel e o objeto de correspondência acrescenta os dados do usuário aos eventos seguintes. Confira no Meta Pixel Helper: o evento depois do `user_identified` deve mostrar os parâmetros de correspondência avançada.
+
+### Tag: Lead
+
+- **Nome da tag**: `Meta - Lead`
+- **Trigger**: `CE - Lead`
+
+```html
+<script>
+  fbq('track', 'Lead', {}, {
+    eventID: {{DLV - event_id}}   // lead_{idLead}, o mesmo que o backend manda na CAPI
+  });
+</script>
+```
 
 ### Tag: Purchase
 
@@ -178,7 +216,7 @@ Se o `eventID` não for passado, o CAPI e o pixel vão criar eventos duplicados 
 </script>
 ```
 
-**Observação:** O código base do Meta Pixel (`fbq('init', 'PIXEL_ID')`) deve estar no `<head>` da página, ANTES do script do GTM. Nunca coloque o `fbq('init')` dentro de uma tag GTM — isso causa race conditions.
+**Observação:** o código base do Meta Pixel (o snippet com `fbq('init', 'PIXEL_ID')` e o PageView) fica no `<head>` de todas as páginas, junto do snippet do GTM. A ordem entre os dois não importa: o stub do `fbq` é criado na hora e o container do GTM carrega de forma assíncrona, então as tags sempre encontram o `fbq`. A única tag que chama `fbq('init')` de novo é a de Advanced Matching, e só para acrescentar os dados do usuário.
 
 ---
 
@@ -186,34 +224,35 @@ Se o `eventID` não for passado, o CAPI e o pixel vão criar eventos duplicados 
 
 Use o tipo de tag nativa **"Evento do Google Analytics: GA4"** (não HTML Personalizado).
 
+**Não monte os parâmetros de e-commerce na mão.** Em cada tag de e-commerce, abra "Mais configurações" → "E-commerce", marque **"Enviar dados de comércio eletrônico"** e escolha a origem **"Camada de dados"**. A tag lê o objeto `ecommerce` do push GA4 (`transaction_id`, `value`, `currency`, `items` como lista de objetos). Montar `items` com as DLVs do push do Meta manda uma lista de IDs, que o GA4 não entende, e lê `value` de outro push.
+
 ### Tag: purchase (GA4)
 
 - **Nome da tag**: `GA4 - purchase`
 - **Trigger**: `CE - purchase (GA4)`
-- **Configuração de tag**: selecione sua tag de configuração GA4 (ou informe o Measurement ID)
+- **ID de medição**: o da sua propriedade GA4
 - **Nome do evento**: `purchase`
-- **Parâmetros do evento**:
-
-| Nome do parâmetro | Valor |
-|---|---|
-| transaction_id | `{{DLV - transaction_id}}` |
-| value | `{{DLV - value}}` |
-| currency | `{{DLV - currency}}` |
-| items | `{{DLV - content_ids (array)}}` |
+- **E-commerce**: "Enviar dados de comércio eletrônico", origem "Camada de dados"
 
 ### Tag: begin_checkout (GA4)
 
 - **Nome da tag**: `GA4 - begin_checkout`
 - **Trigger**: `CE - begin_checkout (GA4)`
 - **Nome do evento**: `begin_checkout`
-- **Parâmetros**: `value`, `currency`, `items`
+- **E-commerce**: "Enviar dados de comércio eletrônico", origem "Camada de dados"
 
 ### Tag: add_payment_info (GA4)
 
 - **Nome da tag**: `GA4 - add_payment_info`
 - **Trigger**: `CE - add_payment_info (GA4)`
 - **Nome do evento**: `add_payment_info`
-- **Parâmetros**: `value`, `currency`, `payment_type` (mapeia para `{{DLV - payment_method}}`), `items`
+- **E-commerce**: "Enviar dados de comércio eletrônico", origem "Camada de dados" (o `payment_type` já vai dentro do objeto `ecommerce`)
+
+### Tag: generate_lead (GA4)
+
+- **Nome da tag**: `GA4 - generate_lead`
+- **Trigger**: `CE - generate_lead (GA4)`
+- **Nome do evento**: `generate_lead`
 
 ---
 
