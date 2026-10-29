@@ -6,7 +6,7 @@ Guia completo sobre como tratar dados pessoais (PII) antes de enviá-los ao Meta
 
 ## 1. Por que hashear PII
 
-Meta e Google exigem que dados pessoais sejam hasheados com SHA-256 antes de serem enviados via pixel browser ou CAPI. Os motivos são:
+Meta e Google exigem que dados pessoais sejam hasheados com SHA-256 antes de serem enviados pelas APIs de servidor (CAPI, Data Manager API). No navegador, o pixel do Meta aceita o dado sem hash e calcula sozinho; se você hashear antes, use a mesma normalização do servidor. Os motivos para hashear:
 
 - **Política obrigatória**: a Meta Business Terms of Service exige que dados pessoais identificáveis sejam hasheados. Enviar PII em texto claro viola os termos e pode resultar em suspensão do pixel.
 - **SHA-256 é one-way**: a Meta consegue fazer o matching com seus próprios dados hasheados (a Meta tem os emails dos usuários logados no Facebook/Instagram), mas não consegue reverter o hash para obter o dado original. Isso é o que torna a CAPI legalmente viável.
@@ -48,16 +48,27 @@ Normalização padrão antes do hash: `.toLowerCase().trim()` (exceto telefone, 
 
 ## 3. Normalização de Telefone para E.164
 
-### Por que E.164
+### Por que normalizar
 
-E.164 é o formato internacional padrão de telefone: `+[código do país][número]`, sem espaços, parênteses ou hífens. A Meta usa esse formato para matching. Se você enviar `(11) 99999-8888` hasheado, a Meta não vai conseguir fazer match porque o hash será diferente do hash que ela tem para `5511999998888`.
+O hash só casa se o texto for idêntico ao que a plataforma tem. Se você enviar `(11) 99999-8888` hasheado, a Meta não vai conseguir fazer match porque o hash será diferente do hash que ela tem para `5511999998888`.
+
+### Meta e Google pedem formatos diferentes
+
+| Plataforma | Formato antes do hash | Exemplo |
+|---|---|---|
+| Meta (pixel e CAPI) | só dígitos, com DDI, **sem** "+" | `5511999998888` |
+| Google (Data Manager API) | E.164 **com** "+" | `+5511999998888` |
+
+O "+" muda o hash. Mandar o formato do Google para o Meta (ou o contrário) faz o telefone parar de casar sem erro nenhum.
 
 ### Regras para Brasil
 
+- Se o número veio com "+", o DDI já está nele: só remove o que não for dígito
 - Remove todos os caracteres não-dígitos
-- Se o resultado tiver 10 ou 11 dígitos: adiciona o prefixo `55` (código do Brasil)
-- Se já começar com `55` e tiver 12 ou 13 dígitos: assume que já está correto
-- O sinal `+` é opcional para a CAPI — a Meta aceita com ou sem
+- Se já começar com `55` e tiver 12 ou 13 dígitos: já está correto
+- Se começar com `0` (discagem de longa distância): remove o `0`
+- Senão: adiciona o prefixo `55`
+- Para o Google: acrescenta o "+" no resultado
 
 ### Exemplos
 
@@ -67,29 +78,38 @@ E.164 é o formato internacional padrão de telefone: `+[código do país][núme
 | `11 9 9999-8888` | `5511999998888` |
 | `+55 11 99999-8888` | `5511999998888` |
 | `5511999998888` | `5511999998888` (já correto) |
-| `99999-8888` | não normalizar — 9 dígitos é inválido para CAPI |
+| `011 99999-8888` | `5511999998888` |
+| `(55) 99999-8888` | `5555999998888` (DDD 55, RS) |
+| `99999-8888` | sem DDD: não dá para normalizar com segurança, não envie |
 
 ### Código TypeScript (backend)
 
 ```typescript
+// Formato do Meta: só dígitos, com DDI, sem "+"
 function normalizePhoneBR(raw: string): string | null {
-  // Remove tudo que não for dígito
-  const digits = raw.replace(/\D/g, '');
+  const hadPlus = raw.trim().startsWith('+');
+  let digits = raw.replace(/\D/g, '');
 
-  if (digits.length === 10 || digits.length === 11) {
-    // Número local BR sem código de país
-    return `55${digits}`;
+  if (hadPlus) return digits.length >= 8 ? digits : null; // DDI informado, qualquer país
+
+  if (digits.startsWith('55') && (digits.length === 12 || digits.length === 13)) {
+    return digits; // já tem o 55
   }
 
-  if (digits.length === 12 || digits.length === 13) {
-    // Provavelmente já tem o código 55
-    if (digits.startsWith('55')) {
-      return digits;
-    }
+  if (digits.startsWith('0')) digits = digits.slice(1); // 0 de longa distância
+
+  if (digits.length === 10 || digits.length === 11) {
+    return `55${digits}`; // DDD + número
   }
 
   // Não foi possível normalizar de forma segura
   return null;
+}
+
+// Formato do Google: E.164 com "+"
+function normalizePhoneGoogle(raw: string): string | null {
+  const meta = normalizePhoneBR(raw);
+  return meta ? `+${meta}` : null;
 }
 ```
 
@@ -97,9 +117,12 @@ function normalizePhoneBR(raw: string): string | null {
 
 ```javascript
 function normalizePhoneBR(raw) {
-  const digits = raw.replace(/\D/g, '');
+  const hadPlus = raw.trim().startsWith('+');
+  let digits = raw.replace(/\D/g, '');
+  if (hadPlus) return digits.length >= 8 ? digits : null;
+  if (digits.startsWith('55') && (digits.length === 12 || digits.length === 13)) return digits;
+  if (digits.startsWith('0')) digits = digits.slice(1);
   if (digits.length === 10 || digits.length === 11) return `55${digits}`;
-  if ((digits.length === 12 || digits.length === 13) && digits.startsWith('55')) return digits;
   return null;
 }
 ```
@@ -202,3 +225,24 @@ O EMQ (Event Match Quality) é a pontuação de 0 a 10 que a Meta atribui à qua
 | Hashear `client_ip_address` | IP hasheado é inútil para a Meta | IP sempre bruto |
 | Enviar hash com letras maiúsculas (`A-F` em vez de `a-f`) | Hash inválido | Usar `.digest('hex')` no Node ou `.toString(16)` no browser — ambos retornam lowercase |
 | Omitir campos opcionais quando disponíveis | EMQ menor que o possível | Envie tudo que tiver: quanto mais campos de matching, maior o EMQ |
+| Telefone com "+" no Meta (ou sem "+" no Google) | O telefone para de casar, sem erro | Uma função de normalização por plataforma |
+| `external_id` com hash num canal e cru no outro | Os dois valores não batem | Mesmo tratamento no navegador e no servidor |
+
+---
+
+## 7. Email para o Google
+
+O Google pede a mesma base (trim + minúsculas) e uma regra a mais: em endereços `gmail.com` e `googlemail.com`, remova os pontos antes do `@`.
+
+```typescript
+function normalizeEmailGoogle(email: string): string {
+  const e = email.trim().toLowerCase();
+  const [local, domain] = e.split('@');
+  if (domain === 'gmail.com' || domain === 'googlemail.com') {
+    return `${local.replace(/\./g, '')}@${domain}`;
+  }
+  return e;
+}
+```
+
+O hash vai em hexadecimal minúsculo, como no Meta. `scripts/enviar-venda-crm.ts` já aplica as duas regras.

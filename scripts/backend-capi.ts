@@ -1,13 +1,17 @@
 /**
  * Meta Conversions API (CAPI) — Servico server-side
  *
- * Envia eventos de conversao diretamente da Meta Graph API v19.0
+ * Envia eventos de conversao para a Meta Graph API (padrao v26.0)
  * sem depender do pixel browser. Funciona mesmo com ad blockers ativos.
  *
- * Variaveis de ambiente obrigatorias:
+ * Variaveis de ambiente:
  *   META_CAPI_PIXEL_ID       — ID numerico do pixel (ex: 123456789012345)
- *   META_CAPI_ACCESS_TOKEN   — System User Access Token (permanente, nao expira)
+ *   META_CAPI_ACCESS_TOKEN   — token gerado no Events Manager (Configuracoes do
+ *                              pixel > Conversions API > Gerar token) ou de um
+ *                              System User com acesso ao pixel
  *   META_CAPI_TEST_CODE      — Codigo de teste (deixar VAZIO em producao!)
+ *   META_GRAPH_API_VERSION   — opcional, padrao "v26.0". Cada versao vive cerca de
+ *                              2 anos: https://developers.facebook.com/docs/graph-api/changelog/versions
  *
  * Seguranca e PII:
  *   - Dados pessoais (email, telefone, nome) sao hasheados SHA-256 ANTES do envio
@@ -17,6 +21,28 @@
  */
 
 import crypto from 'node:crypto'
+
+const GRAPH_API_VERSION = process.env.META_GRAPH_API_VERSION ?? 'v26.0'
+
+/** A Meta recusa a requisicao inteira se algum event_time tiver mais de 7 dias. */
+const MAX_EVENT_AGE_SECONDS = 7 * 24 * 60 * 60
+
+/**
+ * Onde a conversao aconteceu. Valores aceitos pela Meta:
+ * https://developers.facebook.com/docs/marketing-api/conversions-api/parameters/server-event
+ * Venda fechada no CRM: use o canal real do fechamento (chat, phone_call,
+ * physical_store, other). Ver crm-utms-e-vendas.md.
+ */
+export type ActionSource =
+  | 'website'
+  | 'app'
+  | 'email'
+  | 'phone_call'
+  | 'chat'
+  | 'physical_store'
+  | 'system_generated'
+  | 'business_messaging'
+  | 'other'
 
 // ---------------------------------------------------------------------------
 // Interfaces
@@ -41,12 +67,21 @@ export interface CAPIContext {
   capiEventId?: string
   /** Cookie _fbp do browser — identifica o browser do usuario para a Meta */
   fbp?: string
-  /** Cookie _fbc ou fbclid da URL — identifica o clique no anuncio */
+  /**
+   * Click ID do anuncio no formato fb.1.{timestamp_ms}.{fbclid}.
+   * Vem do cookie _fbc ou e montado a partir do fbclid da URL (ver captura-origem.js).
+   * NUNCA mandar o fbclid cru aqui e nunca mudar maiusculas/minusculas.
+   */
   fbc?: string
   /** IP real do cliente — NAO enviar IP do servidor */
   ipAddress?: string
   /** User-Agent completo do browser do cliente */
   userAgent?: string
+  /**
+   * ID do lead quando ele veio de formulario instantaneo do Meta (Lead Ads).
+   * Vai sem hash em user_data.lead_id.
+   */
+  leadId?: string
 }
 
 /**
@@ -87,9 +122,9 @@ export interface UserCAPIData {
  * Usado em Purchase, ViewContent, InitiateCheckout.
  */
 export interface CAPIProduct {
-  /** ID do produto no seu catalogo (ex: "kit-completo", "curso-mptd") */
+  /** ID do produto no seu catalogo (ex: "produto-exemplo", "curso-exemplo") */
   id: string
-  /** Nome do produto (ex: "Kit FlyVet") */
+  /** Nome do produto (ex: "Produto Exemplo") */
   name?: string
   /** Preco unitario em BRL */
   price?: number
@@ -117,12 +152,11 @@ function hashField(value: string): string {
 }
 
 /**
- * Normaliza um numero de telefone brasileiro para o formato E.164
- * sem o sinal de + (ex: "5511999999999").
+ * Normaliza um telefone para o formato que a META espera antes do hash:
+ * so digitos, com DDI, SEM o sinal de + (ex: "5511999999999").
  *
- * A Meta espera o telefone neste formato ANTES do hashing SHA-256.
- * Um telefone sem DDI do pais gera um hash diferente do que a Meta tem
- * na base, resultando em EMQ baixo.
+ * Atencao: o Google (Data Manager API) quer o E.164 COM o "+" antes do hash.
+ * O mesmo telefone gera hashes diferentes para cada plataforma. Ver pii-hashing.md.
  *
  * Formatos aceitos:
  *   - "11999999999"        → "5511999999999"
@@ -130,32 +164,28 @@ function hashField(value: string): string {
  *   - "+55 11 99999-9999"  → "5511999999999"
  *   - "55 11 99999-9999"   → "5511999999999"
  *   - "011999999999"       → "5511999999999"
+ *   - "(55) 99999-9999"    → "5555999999999"  (DDD 55, RS)
+ *   - "+1 415 555 2671"    → "14155552671"    (com "+", o DDI informado e respeitado)
  */
-function normalizePhone(phone: string): string {
-  // Remove tudo exceto digitos e o sinal +
-  let normalized = phone.replace(/[^\d+]/g, '')
+export function normalizePhone(phone: string): string {
+  const hadPlus = phone.trim().startsWith('+')
+  let digits = phone.replace(/\D/g, '')
 
-  // Remove o sinal + inicial se presente
-  if (normalized.startsWith('+')) {
-    normalized = normalized.slice(1)
+  // Veio com "+": o DDI ja esta no numero, qualquer pais
+  if (hadPlus) return digits
+
+  // Ja tem DDI do Brasil (55 + DDD + numero = 12 ou 13 digitos)
+  if (digits.startsWith('55') && (digits.length === 12 || digits.length === 13)) {
+    return digits
   }
 
-  // Se ja comeca com 55 e tem comprimento correto (12 ou 13 digitos), esta ok
-  if (normalized.startsWith('55') && (normalized.length === 12 || normalized.length === 13)) {
-    return normalized
+  // Remove o 0 de discagem de longa distancia (ex: "011999999999" → "11999999999")
+  if (digits.startsWith('0')) {
+    digits = digits.slice(1)
   }
 
-  // Remove o 0 inicial de discagem trunk (ex: "011999999999" → "11999999999")
-  if (normalized.startsWith('0')) {
-    normalized = normalized.slice(1)
-  }
-
-  // Adiciona codigo do Brasil (55) se nao presente
-  if (!normalized.startsWith('55')) {
-    normalized = '55' + normalized
-  }
-
-  return normalized
+  // Numero brasileiro sem DDI
+  return '55' + digits
 }
 
 /**
@@ -244,6 +274,11 @@ function buildUserData(
     userData.client_user_agent = context.userAgent
   }
 
+  if (context.leadId) {
+    // Lead Ads: o ID do lead liga a venda ao formulario instantaneo, sem hash
+    userData.lead_id = context.leadId
+  }
+
   // Remove campos undefined para nao enviar chaves nulas no payload
   return Object.fromEntries(
     Object.entries(userData).filter(([, v]) => v !== undefined)
@@ -258,6 +293,13 @@ interface CAPIEventPayload {
   eventName: string
   /** event_id para deduplicacao com o pixel browser — usar capiEventId do banco */
   eventId?: string
+  /**
+   * Quando o evento aconteceu (Unix em SEGUNDOS). Padrao: agora.
+   * Para venda confirmada depois (webhook, CRM), mande a hora real da venda.
+   */
+  eventTime?: number
+  /** Padrao: 'website'. Para venda fechada fora do site, ver ActionSource. */
+  actionSource?: ActionSource
   /** URL da pagina onde ocorreu o evento */
   eventSourceUrl?: string
   user: UserCAPIData
@@ -266,7 +308,7 @@ interface CAPIEventPayload {
 }
 
 /**
- * Funcao interna que envia um evento para a Meta CAPI via Graph API v19.0.
+ * Funcao interna que envia um evento para a Meta CAPI via Graph API.
  *
  * NAO use esta funcao diretamente nas rotas — use as funcoes publicas
  * exportadas (sendPurchase, sendInitiateCheckout, etc.) que fornecem
@@ -297,19 +339,31 @@ async function sendCAPIEvent(payload: CAPIEventPayload): Promise<void> {
     return
   }
 
-  const eventTime = Math.floor(Date.now() / 1000) // Unix timestamp em segundos
+  const now = Math.floor(Date.now() / 1000) // Unix timestamp em segundos
+  const eventTime = payload.eventTime ?? now
 
+  if (now - eventTime > MAX_EVENT_AGE_SECONDS) {
+    // A Meta derrubaria a requisicao inteira. Melhor falhar aqui com mensagem clara.
+    throw new Error(`[CAPI] ${payload.eventName} com event_time de mais de 7 dias — a Meta recusa. Envie as vendas com mais frequencia.`)
+  }
+
+  const actionSource = payload.actionSource ?? 'website'
   const userData = buildUserData(payload.user, payload.context)
+
+  if (actionSource === 'website' && !userData.client_user_agent) {
+    // Para action_source=website a Meta exige client_user_agent
+    console.warn('[CAPI] action_source=website sem client_user_agent — a Meta pode rejeitar:', payload.eventName)
+  }
 
   const eventData: Record<string, unknown> = {
     event_name: payload.eventName,
     event_time: eventTime,
-    action_source: 'website',
+    action_source: actionSource,
     user_data: userData,
   }
 
-  // event_id e obrigatorio para deduplicacao com o pixel browser
-  // Se nao disponivel, gerar um UUID (sem deduplicacao, mas melhor que nada)
+  // event_id: a Meta deduplica quando event_name E event_id batem (janela de 48 h).
+  // Se nao vier, gera um UUID: o evento chega, mas sem deduplicacao.
   const eventId = payload.eventId ?? payload.context.capiEventId ?? crypto.randomUUID()
   eventData.event_id = eventId
 
@@ -329,7 +383,8 @@ async function sendCAPIEvent(payload: CAPIEventPayload): Promise<void> {
   }
 
   // Adicionar test_event_code APENAS se definido (remover em producao!)
-  // ATENCAO: eventos com test_event_code NAO sao processados como conversoes reais
+  // ATENCAO: eventos com test_event_code NAO sao descartados. Aparecem em Test Events
+  // e tambem entram nos dados do pixel (segmentacao e mensuracao).
   const testCode = process.env.META_CAPI_TEST_CODE
   if (testCode && testCode.trim() !== '') {
     body.test_event_code = testCode.trim()
@@ -337,7 +392,8 @@ async function sendCAPIEvent(payload: CAPIEventPayload): Promise<void> {
     console.warn('[CAPI] ATENCAO: enviando para Test Events (nao producao). Limpe META_CAPI_TEST_CODE para producao.')
   }
 
-  const url = `https://graph.facebook.com/v19.0/${pixelId}/events?access_token=${accessToken}`
+  // O token vai na query string: nunca logue esta URL
+  const url = `https://graph.facebook.com/${GRAPH_API_VERSION}/${pixelId}/events?access_token=${accessToken}`
 
   // Log seguro — sem PII, sem access token
   console.log('[CAPI] Enviando evento:', {
@@ -355,11 +411,13 @@ async function sendCAPIEvent(payload: CAPIEventPayload): Promise<void> {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
+    // Sem timeout, uma Meta lenta segura a conexao indefinidamente
+    signal: AbortSignal.timeout(10_000),
   })
 
-  const responseData = await response.json() as Record<string, unknown>
+  const responseData = await response.json().catch(() => ({})) as Record<string, unknown>
 
-  // A Meta pode retornar status 200 mas com corpo de erro
+  // Erros da Graph API voltam com status 4xx e um objeto "error" (ex: code 190 = token invalido)
   if (!response.ok || responseData.error) {
     const errorInfo = responseData.error as Record<string, unknown> | undefined
     throw new Error(
@@ -370,14 +428,53 @@ async function sendCAPIEvent(payload: CAPIEventPayload): Promise<void> {
   console.log('[CAPI] Evento enviado com sucesso:', {
     eventName: payload.eventName,
     eventId,
-    // numEventsReceived e retornado pela Meta em responses bem-sucedidas
-    numEventsReceived: responseData.num_events_received,
+    // events_received e retornado pela Meta em responses bem-sucedidas
+    eventsReceived: responseData.events_received,
   })
 }
 
 // ---------------------------------------------------------------------------
 // Funcoes publicas exportadas
 // ---------------------------------------------------------------------------
+
+/**
+ * Envia evento Lead: disparar quando o formulario de contato chega ao backend
+ * (antes de criar o lead no CRM).
+ *
+ * Equivalente GTM/pixel: fbq('track', 'Lead', {}, { eventID: 'lead_' + idLead })
+ *
+ * event_id: use `lead_{idLead}` dos dois lados. O navegador recebe o idLead na
+ * resposta do POST e dispara o pixel com o mesmo ID.
+ *
+ * Fire-and-forget recomendado:
+ *   sendLead(...).catch(err => console.error('[CAPI] Lead:', err))
+ */
+export async function sendLead(options: {
+  /** ID do lead no seu sistema ou no CRM */
+  leadId: string
+  user: UserCAPIData
+  context: CAPIContext
+  /** URL da pagina do formulario */
+  eventSourceUrl?: string
+  /** Valor estimado do lead (opcional) */
+  value?: number
+  currency?: string
+}): Promise<void> {
+  const customData: Record<string, unknown> = {}
+  if (options.value !== undefined) {
+    customData.value = options.value
+    customData.currency = options.currency ?? 'BRL'
+  }
+
+  return sendCAPIEvent({
+    eventName: 'Lead',
+    eventId: `lead_${options.leadId}`,
+    context: options.context,
+    user: options.user,
+    eventSourceUrl: options.eventSourceUrl,
+    customData: Object.keys(customData).length > 0 ? customData : undefined,
+  })
+}
 
 /**
  * Envia evento CompleteRegistration — disparar quando o usuario cria conta
@@ -567,14 +664,17 @@ export async function sendAddPaymentInfo(options: {
 /**
  * Envia evento Purchase — o evento mais importante para otimizacao de campanhas.
  *
- * Equivalente GTM/pixel: fbq('track', 'Purchase', { value: 47.90, currency: 'BRL' })
+ * Equivalente GTM/pixel: fbq('track', 'Purchase', { value: 197.00, currency: 'BRL' })
  *
  * Quando disparar:
- * - NO WEBHOOK de confirmacao de pagamento (Asaas, Stripe, etc.)
+ * - NO WEBHOOK de confirmacao de pagamento (Asaas, Stripe, Mercado Pago etc.)
+ * - Quando a venda for marcada no CRM (ver scripts/enviar-venda-crm.ts)
  * - Usar o capiEventId salvo no banco (mesmo ID do pixel browser = deduplicacao)
  * - NAO gerar um novo UUID aqui — o frontend e a fonte de verdade do event_id
+ * - Sem capiEventId, o event_id cai para `purchase_{orderId}`: polling e webhook
+ *   geram o mesmo ID e a Meta conta uma venda so
  *
- * Exemplo de uso no webhook do Asaas:
+ * Exemplo de uso no webhook do gateway:
  *   const payment = await db.payment.findUnique(...)
  *   sendPurchase({
  *     eventId: payment.capiEventId ?? undefined, // ID do frontend
@@ -588,6 +688,7 @@ export async function sendAddPaymentInfo(options: {
  *     products: [{ id: payment.productSlug, price: payment.amount }],
  *     value: payment.amount,
  *     orderId: payment.id,
+ *     eventTime: Math.floor(payment.confirmedAt.getTime() / 1000), // hora real da venda
  *   }).catch(err => console.error('[CAPI] Purchase:', err))
  *
  * DEDUPLICACAO:
@@ -611,13 +712,21 @@ export async function sendPurchase(options: {
   numItems?: number
   /** URL da pagina de confirmacao */
   eventSourceUrl?: string
+  /** Hora real da venda (Unix em SEGUNDOS). Padrao: agora. Maximo 7 dias atras. */
+  eventTime?: number
+  /** Padrao 'website'. Venda fechada no CRM: canal real do fechamento. */
+  actionSource?: ActionSource
+  /**
+   * Campos extras em custom_data (ex: UTMs com os IDs de campanha guardados no CRM).
+   * A Meta guarda para relatorio e conversao personalizada, mas NAO usa para
+   * atribuir: quem liga a venda ao anuncio e o user_data (fbc, telefone, email).
+   */
+  extraCustomData?: Record<string, unknown>
 }): Promise<void> {
   const customData: Record<string, unknown> = {
+    ...options.extraCustomData,
     value: options.value,
     currency: options.currency ?? 'BRL',
-    content_ids: options.products.map(p => p.id),
-    content_type: 'product',
-    num_items: options.numItems ?? options.products.reduce((acc, p) => acc + (p.quantity ?? 1), 0),
   }
 
   if (options.orderId) {
@@ -625,6 +734,9 @@ export async function sendPurchase(options: {
   }
 
   if (options.products.length > 0) {
+    customData.content_ids = options.products.map(p => p.id)
+    customData.content_type = 'product'
+    customData.num_items = options.numItems ?? options.products.reduce((acc, p) => acc + (p.quantity ?? 1), 0)
     customData.contents = options.products.map(p => ({
       id: p.id,
       quantity: p.quantity ?? 1,
@@ -634,9 +746,13 @@ export async function sendPurchase(options: {
 
   return sendCAPIEvent({
     eventName: 'Purchase',
-    // Se nao tiver eventId explıcito, tenta pegar do context (capiEventId)
-    // O context.capiEventId e o mesmo ID gerado pelo frontend e salvo no banco
-    eventId: options.eventId ?? options.context.capiEventId,
+    // Ordem: eventId explicito > capiEventId salvo no checkout > purchase_{orderId}.
+    // O ultimo e deterministico: qualquer canal que mande o mesmo pedido gera o mesmo ID.
+    eventId: options.eventId
+      ?? options.context.capiEventId
+      ?? (options.orderId ? `purchase_${options.orderId}` : undefined),
+    eventTime: options.eventTime,
+    actionSource: options.actionSource,
     context: options.context,
     user: options.user,
     eventSourceUrl: options.eventSourceUrl,

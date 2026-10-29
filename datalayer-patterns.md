@@ -42,11 +42,28 @@ O dataLayer é o **contrato entre dev e marketing**. O dev define o que envia; o
 
 | Evento (Meta/PascalCase) | Evento GA4 (snake_case) | Gatilho |
 |--------------------------|-------------------------|---------|
+| `Lead` | `generate_lead` | Formulário de contato enviado (backend respondeu com o ID do lead) |
 | `ViewContent` | `view_item` | Usuário vê página/modal do produto |
 | `CompleteRegistration` | `sign_up` | Cadastro ou login bem-sucedido |
 | `InitiateCheckout` | `begin_checkout` | Abre o fluxo de checkout |
 | `AddPaymentInfo` | `add_payment_info` | Preenche dados de pagamento |
 | `Purchase` | `purchase` | Pagamento confirmado |
+
+### Lead
+
+```js
+// Depois que o backend respondeu { leadId } ao POST do formulário
+// Meta push: o backend manda a CAPI com o mesmo ID (sendLead)
+window.dataLayer.push({
+  event: 'Lead',
+  event_id: 'lead_' + leadId,
+})
+
+// GA4 push
+window.dataLayer.push({ event: 'generate_lead' })
+```
+
+Os campos ocultos de origem (UTMs, `fbc`, `gclid`) vão no próprio formulário: ver `crm-utms-e-vendas.md`.
 
 ### ViewContent
 
@@ -54,11 +71,11 @@ O dataLayer é o **contrato entre dev e marketing**. O dev define o que envia; o
 // Meta push
 window.dataLayer.push({
   event: 'ViewContent',
-  content_ids: ['kit-completo'],
+  content_ids: ['produto-exemplo'],
   content_type: 'product',
-  value: 47.90,
+  value: 197.00,
   currency: 'BRL',
-  content_name: 'Kit FlyVet - Acesso Vitalício',
+  content_name: 'Produto Exemplo',
   event_id: crypto.randomUUID(), // para deduplicação com CAPI
 })
 
@@ -68,11 +85,11 @@ window.dataLayer.push({
   event: 'view_item',
   ecommerce: {
     currency: 'BRL',
-    value: 47.90,
+    value: 197.00,
     items: [{
-      item_id: 'kit-completo',
-      item_name: 'Kit FlyVet - Acesso Vitalício',
-      price: 47.90,
+      item_id: 'produto-exemplo',
+      item_name: 'Produto Exemplo',
+      price: 197.00,
       quantity: 1,
       item_category: 'digital',
     }]
@@ -104,12 +121,12 @@ window.dataLayer.push({
 // Meta push
 window.dataLayer.push({
   event: 'InitiateCheckout',
-  content_ids: ['kit-completo'],
+  content_ids: ['produto-exemplo'],
   content_type: 'product',
-  value: 47.90,
+  value: 197.00,
   currency: 'BRL',
   num_items: 1,
-  event_id: crypto.randomUUID(),
+  event_id: checkoutId, // gerado UMA vez quando o checkout abriu e enviado ao backend
 })
 
 // GA4 push (separado!)
@@ -118,11 +135,11 @@ window.dataLayer.push({
   event: 'begin_checkout',
   ecommerce: {
     currency: 'BRL',
-    value: 47.90,
+    value: 197.00,
     items: [{
-      item_id: 'kit-completo',
-      item_name: 'Kit FlyVet - Acesso Vitalício',
-      price: 47.90,
+      item_id: 'produto-exemplo',
+      item_name: 'Produto Exemplo',
+      price: 197.00,
       quantity: 1,
       item_category: 'digital',
     }]
@@ -136,12 +153,12 @@ window.dataLayer.push({
 // Meta push
 window.dataLayer.push({
   event: 'AddPaymentInfo',
-  content_ids: ['kit-completo'],
+  content_ids: ['produto-exemplo'],
   content_type: 'product',
-  value: 47.90,
+  value: 197.00,
   currency: 'BRL',
   payment_method: 'PIX', // ou 'credit_card'
-  event_id: crypto.randomUUID(),
+  event_id: checkoutId, // o mesmo do InitiateCheckout
 })
 
 // GA4 push (separado!)
@@ -150,12 +167,12 @@ window.dataLayer.push({
   event: 'add_payment_info',
   ecommerce: {
     currency: 'BRL',
-    value: 47.90,
+    value: 197.00,
     payment_type: 'PIX',
     items: [{
-      item_id: 'kit-completo',
-      item_name: 'Kit FlyVet - Acesso Vitalício',
-      price: 47.90,
+      item_id: 'produto-exemplo',
+      item_name: 'Produto Exemplo',
+      price: 197.00,
       quantity: 1,
       item_category: 'digital',
     }]
@@ -169,14 +186,14 @@ window.dataLayer.push({
 // Meta push
 window.dataLayer.push({
   event: 'Purchase',
-  content_ids: ['kit-completo'],
+  content_ids: ['produto-exemplo'],
   content_type: 'product',
-  value: 47.90,
+  value: 197.00,
   currency: 'BRL',
   num_items: 1,
   transaction_id: 'PAY_123abc',
   payment_method: 'PIX',
-  event_id: 'uuid-gerado-no-frontend-e-enviado-ao-backend', // CRÍTICO
+  event_id: checkoutId, // CRÍTICO: o mesmo que o backend salvou e usa no webhook
 })
 
 // GA4 push (separado!)
@@ -185,13 +202,13 @@ window.dataLayer.push({
   event: 'purchase',
   ecommerce: {
     transaction_id: 'PAY_123abc',
-    value: 47.90,
+    value: 197.00,
     currency: 'BRL',
     payment_type: 'PIX',
     items: [{
-      item_id: 'kit-completo',
-      item_name: 'Kit FlyVet - Acesso Vitalício',
-      price: 47.90,
+      item_id: 'produto-exemplo',
+      item_name: 'Produto Exemplo',
+      price: 197.00,
       quantity: 1,
       item_category: 'digital',
     }]
@@ -213,13 +230,13 @@ window.dataLayer.push({
   event: 'purchase',           // snake_case para GA4
   ecommerce: {
     transaction_id: 'PAY_123', // obrigatório para deduplicação
-    value: 47.90,
+    value: 197.00,
     currency: 'BRL',
     payment_type: 'PIX',       // dimensão customizada
     items: [{
-      item_id: 'kit-completo',
-      item_name: 'Kit Premium',
-      price: 47.90,
+      item_id: 'produto-exemplo',
+      item_name: 'Produto Exemplo',
+      price: 197.00,
       quantity: 1,
       item_category: 'digital',
     }]
@@ -241,28 +258,28 @@ Meta Pixel usa campos no nível raiz do push, fora de qualquer objeto aninhado:
 ```js
 window.dataLayer.push({
   event: 'Purchase',              // PascalCase para Meta
-  content_ids: ['kit-completo'],  // array de IDs
+  content_ids: ['produto-exemplo'],  // array de IDs
   content_type: 'product',        // 'product' ou 'product_group'
-  value: 47.90,
+  value: 197.00,
   currency: 'BRL',
   num_items: 1,
   transaction_id: 'PAY_123',
   payment_method: 'PIX',          // dimensão customizada
-  event_id: 'uuid-gerado-no-frontend', // CRÍTICO para CAPI dedup
+  event_id: checkoutId, // CRÍTICO para CAPI dedup
 
   // Dados do usuário hasheados (SHA-256, lowercase, sem espaços)
   user: {
-    email: 'a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3',
+    email: '973dfe463ec85785f5f95af5ba3906eedb2d931c24e69824a89ea65dba4e813b', // test@example.com
     fn: 'hash-sha256-do-primeiro-nome',
     ln: 'hash-sha256-do-sobrenome',
-    phone: 'hash-sha256-do-telefone-em-e164', // ex: +5511999999999
-    external_id: 'uuid-raw-do-usuario',       // NÃO hasheado
+    phone: 'hash-sha256-do-telefone',  // de 5511999999999: só dígitos, com DDI, SEM "+"
+    external_id: 'hash-sha256-do-id',  // com hash, igual ao que o backend manda na CAPI
   }
 })
 ```
 
 **Sobre o objeto `user`:**
-O GTM tem uma tag do Meta Pixel que pode ser configurada para ler variáveis de dataLayer e enviá-las como Advanced Matching. Definir `user` no push permite que a tag passe esses dados automaticamente para o fbq sem que você precise chamar `fbq` diretamente.
+Ele só vira Advanced Matching se uma tag passar esses valores para o pixel. Pushar `user` no dataLayer, sozinho, não manda nada. Ver a tag "Meta - Advanced Matching" em `gtm-setup.md`, que dispara no evento `user_identified`.
 
 ---
 
@@ -286,7 +303,7 @@ window.dataLayer.push({
   event: 'Purchase',        // casing errado para GA4
   ecommerce: { ... },       // GA4 vai ler isso
   content_ids: [...],       // Meta vai ler isso
-  value: 47.90,             // ambos leem, mas de lugares diferentes
+  value: 197.00,             // ambos leem, mas de lugares diferentes
   event_id: 'uuid',         // GA4 ignora, Meta usa
 })
 ```
@@ -305,7 +322,7 @@ O GTM vai disparar a tag do GA4 e a tag do Meta Pixel para o mesmo push. A tag d
 
 ### Estrutura e hashing
 
-Todos os PII (Personally Identifiable Information) devem ser hasheados com SHA-256 antes de entrar no dataLayer. A Meta exige: lowercase, sem espaços extras, formato E.164 para telefone.
+Todos os PII (Personally Identifiable Information) devem ser hasheados com SHA-256 antes de entrar no dataLayer. A normalização tem que ser a mesma do backend: email em minúsculas e sem espaços, telefone só com dígitos, com DDI e sem "+".
 
 ```js
 async function sha256(str) {
@@ -320,20 +337,22 @@ async function sha256(str) {
 
 // Chamada setUserInDataLayer antes de qualquer evento de checkout
 async function setUserInDataLayer({ email, firstName, lastName, phone, userId }) {
-  const [hashedEmail, hashedFn, hashedLn, hashedPhone] = await Promise.all([
+  const [hashedEmail, hashedFn, hashedLn, hashedPhone, hashedUserId] = await Promise.all([
     sha256(email),
     sha256(firstName),
     sha256(lastName),
-    sha256(phone), // já em E.164: +5511999999999
+    sha256(phone), // já normalizado: 5511999999999 (sem "+")
+    sha256(String(userId)),
   ])
 
   window.dataLayer.push({
+    event: 'user_identified', // dispara a tag de Advanced Matching
     user: {
       email: hashedEmail,
       fn: hashedFn,
       ln: hashedLn,
       phone: hashedPhone,
-      external_id: userId, // UUID raw, não hasheado
+      external_id: hashedUserId, // com hash, igual ao backend
     }
   })
 }
@@ -347,15 +366,14 @@ async function setUserInDataLayer({ email, firstName, lastName, phone, userId })
 
 Como o dataLayer persiste estado, uma vez setado, o objeto `user` estará disponível em todos os pushes subsequentes. As tags do GTM vão conseguir ler esses dados em qualquer evento.
 
-### Formato E.164 para telefone
+### Formato do telefone antes do hash
 
-```
-+5511999999999  (Brasil, celular SP)
-+5521999999999  (Brasil, celular RJ)
-+14155552671    (EUA)
-```
+| Plataforma | Formato | Exemplo |
+|---|---|---|
+| Meta (pixel e CAPI) | só dígitos, com DDI, sem "+" | `5511999999999` |
+| Google (Data Manager API) | E.164 com "+" | `+5511999999999` |
 
-Sempre remover: espaços, traços, parênteses, pontos. Sempre incluir DDI.
+O "+" muda o hash. Sempre remover espaços, traços, parênteses e pontos, e sempre incluir o DDI. Ver `pii-hashing.md`.
 
 ---
 
@@ -367,13 +385,13 @@ Sempre remover: espaços, traços, parênteses, pontos. Sempre incluir DDI.
 // Push 1
 window.dataLayer.push({
   event: 'begin_checkout',
-  ecommerce: { value: 47.90, items: [{ item_id: 'kit-completo' }] }
+  ecommerce: { value: 197.00, items: [{ item_id: 'produto-exemplo' }] }
 })
 
 // Push 2 — SEM limpar ecommerce primeiro
 window.dataLayer.push({
   event: 'purchase',
-  ecommerce: { value: 47.90, transaction_id: 'PAY_123', items: [{ item_id: 'kit-completo' }] }
+  ecommerce: { value: 197.00, transaction_id: 'PAY_123', items: [{ item_id: 'produto-exemplo' }] }
 })
 ```
 
@@ -393,24 +411,27 @@ Sem `event_id`:
 - Meta conta **duas conversões** para a mesma compra
 - Seus relatórios de ROAS ficam inflados
 
-**Correção:** gerar um UUID no frontend, colocar no push do dataLayer, E enviar esse mesmo UUID para o backend junto com os dados de pagamento. O backend inclui no request da CAPI.
+**Correção:** gerar UM ID quando o checkout abre, mandar ao backend no POST que cria o pagamento (o backend salva no banco) e usar esse mesmo ID em todos os pushes do checkout. O webhook do backend lê o ID do banco e manda na CAPI.
 
 ```js
-const eventId = crypto.randomUUID() // gera no frontend
+// Checkout abriu
+const checkoutId = crypto.randomUUID()
 
-// Envia para dataLayer (Pixel vai usar)
+// Backend salva checkoutId junto com o pagamento (capiEventId)
+await fetch('/api/checkout/create', {
+  method: 'POST',
+  body: JSON.stringify({ checkoutId, /* produto, contato... */ })
+})
+
+// Pagamento confirmado (polling): o pixel usa o MESMO ID
 window.dataLayer.push({
   event: 'Purchase',
-  event_id: eventId,
+  event_id: checkoutId,
   // ...
 })
-
-// Envia para o backend (CAPI vai usar)
-await fetch('/api/checkout/confirm', {
-  method: 'POST',
-  body: JSON.stringify({ paymentId, eventId, /* ... */ })
-})
 ```
+
+**Erro que parece certo:** gerar `crypto.randomUUID()` na hora do Purchase e mandar ao backend depois. O webhook pode chegar antes, já com o ID salvo no checkout, e aí o navegador e o webhook mandam IDs diferentes. A Meta conta duas vendas.
 
 ---
 
@@ -439,9 +460,9 @@ Detalhe sutil: a tag do Meta Pixel no GTM lê `value` da raiz do push. A tag do 
 ```js
 window.dataLayer.push({
   event: 'Purchase', // casing errado para GA4
-  value: 47.90,      // Meta lê aqui
+  value: 197.00,      // Meta lê aqui
   ecommerce: {
-    value: 47.90,    // GA4 lê aqui
+    value: 197.00,    // GA4 lê aqui
     // ...
   }
 })
